@@ -112,7 +112,7 @@ class Dispatcher:
             
             try:
                 request_line = yield from asyncio.wait_for(reader.readline(), 90)
-            except TimeoutError as error:
+            except asyncio.TimeoutError as error:
                 # After request timeout, send an error response then close the connection
                 handler = self.error_handler_factory(self, None, reader, writer)
                 yield from self.loop.create_task(handler.error(408))
