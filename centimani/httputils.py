@@ -151,17 +151,19 @@ class HTTPHeaders(MultiMap):
 
 
 class Request:
-    __slots__ = ("version", "method", "path", "headers")
+    __slots__ = ("version", "method", "path", "query", "headers")
 
     def __init__(self,
         version="1.1",
         method="GET",
         path="/",
+        query={},
         headers=HTTPHeaders()
     ):
         self.version = version
         self.method = method
         self.path = path
+        self.query = query
         self.headers = headers
 
 

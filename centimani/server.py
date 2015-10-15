@@ -1,6 +1,7 @@
 import re
 import asyncio
 
+from urllib.parse import urlsplit, parse_qs
 from asyncio import coroutine
 
 from centimani.httputils import *
@@ -86,7 +87,7 @@ class RoutingError(Exception):
 
 class Dispatcher:
 
-    REQUEST_LINE = re.compile(r"^([A-Z]+) ([A-Za-z0-9_/.-]+) HTTP/([0-9.]+)$")
+    REQUEST_LINE = re.compile(r"^([A-Z]+) ([A-Za-z0-9_/.&=?-]+) HTTP/([0-9.]+)$")
 
     def __init__(self, routes, loop=None):
         self.routes = routes
@@ -139,9 +140,13 @@ class Dispatcher:
                 yield from self.loop.create_task(handler.error(400))
                 break
 
-            method, path, version = match.groups()
+            method, url, version = match.groups()
 
-            request = Request(version, method, path, headers)
+            url = urlsplit(url)
+            path = url.path
+            query = parse_qs(url.query)
+
+            request = Request(version, method, path, query, headers)
 
             #Routing
             try:
