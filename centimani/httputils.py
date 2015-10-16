@@ -158,13 +158,13 @@ class Request:
         method="GET",
         path="/",
         query={},
-        headers=HTTPHeaders()
+        headers=None
     ):
         self.version = version
         self.method = method
         self.path = path
         self.query = query
-        self.headers = headers
+        self.headers = headers or HTTPHeaders()
 
 
 class Response:
@@ -173,8 +173,8 @@ class Response:
     def __init__(self,
         version="1.1",
         status=200,
-        headers=HTTPHeaders()
+        headers=None
     ):
         self.version = version
         self.status = status
-        self.headers = headers
+        self.headers = headers or HTTPHeaders()
