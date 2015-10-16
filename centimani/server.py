@@ -1,7 +1,7 @@
 import re
 import asyncio
 
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, unquote_plus, parse_qs
 from asyncio import coroutine
 
 from centimani.httputils import *
@@ -85,9 +85,11 @@ class RequestHandler(BaseHandler, metaclass=MetaRequestHandler):
 class RoutingError(Exception):
     pass
 
-class Dispatcher:
 
-    REQUEST_LINE = re.compile(r"^([A-Z]+) ([A-Za-z0-9_/.&=?-]+) HTTP/([0-9.]+)$")
+REQUEST_PATTERN = r"^([A-Z]+) ((?:/|(?:/[\w%+.-]+)+/?)(?:\?[\w%+.-]+=[\w%+.-]+(?:&[\w%+.-]+=[\w%+.-]+)*)?) HTTP/(\d+\.\d+)$"
+REQUEST_REGEX = re.compile(REQUEST_PATTERN)
+
+class Dispatcher:
 
     def __init__(self, routes, loop=None):
         self.routes = routes
@@ -106,6 +108,8 @@ class Dispatcher:
     def handle_connection(self, reader, writer):
         handler = None
         
+        peername = writer.get_extra_info("peername")
+
         while True:
             if handler and handler.request and not handler.is_body_read:
                 # read previous request's body if not read
@@ -117,6 +121,8 @@ class Dispatcher:
                 # After request timeout, send an error response then close the connection
                 handler = self.error_handler_factory(self, None, reader, writer)
                 yield from self.loop.create_task(handler.error(408))
+                break
+            except ConnectionResetError as error:
                 break
 
             request_line = request_line.decode("ascii").strip()
@@ -132,13 +138,15 @@ class Dispatcher:
                 headers.parse_line(line.decode("ascii").strip())
                 line = yield from reader.readline()
 
-            match = self.REQUEST_LINE.match(request_line)
+            match = REQUEST_REGEX.match(request_line)
             
-            if not match:
+            if match is None:
                 # Bad request, connection is closed after error is send
                 handler = self.error_handler_factory(self, None, reader, writer)
                 yield from self.loop.create_task(handler.error(400))
                 break
+
+            request_line = unquote_plus(request_line)
 
             method, url, version = match.groups()
 
@@ -172,6 +180,7 @@ class Dispatcher:
             except Exception as error:
                 handler = self.error_handler_factory(self, request, reader, writer)
                 yield from self.loop.create_task(handler.error(500))
+                raise error
                 
             if "Connection" in request.headers and request.headers.get("Connection") == "close":
                 break
