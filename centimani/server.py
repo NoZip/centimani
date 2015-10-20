@@ -88,14 +88,16 @@ class BaseHandler:
             check = self.reader.read(2)
             if check != "\r\n":
                 raise ChunkParseError("chunk parsing failed")
-        
+
         # parsing trailer headers
         
         line = ""
         try:
             line = yield from self.reader.readline()
             while (line != b"\r\n"):
-                self.request.headers.parse_line(line.decode("ascii").strip())
+                line = line.strip().decode("ascii")
+                name, value = self.request.headers.parse_line(line)
+                self.request.headers.add(name, value)
                 line = yield from self.reader.readline()
         except HeaderParseError as error:
             raise ChunkParseError("trailer parsing failed")
@@ -239,7 +241,8 @@ class Dispatcher:
                 headers = HTTPHeaders()
                 line = yield from reader.readline()
                 while (line != b"\r\n"):
-                    headers.parse_line(line.decode("ascii").strip())
+                    name, value = headers.parse_line(line.decode("ascii").strip())
+                    headers.add(name, value)
                     line = yield from reader.readline()
             except HeaderParseError as error:
                 # Bad request, connection is closed after error is send

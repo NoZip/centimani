@@ -111,12 +111,14 @@ def rfc1123_datetime_decode(string):
 class HeaderParseError(Exception):
     pass
 
+
+HEADER_PATTERN = r"^([\w-]+): *(.+) *$"
+HEADER_REGEX = re.compile(HEADER_PATTERN)
+
 class HTTPHeaders(defaultdict):
     """
     Used to handle HTTP headers.
     """
-
-    HEADER_REGEX = re.compile(r"^([\w-]+): *(.+) *$")
 
     def __init__(self, **kwargs):
         super().__init__(list)
@@ -156,8 +158,9 @@ class HTTPHeaders(defaultdict):
         else:
             self.__getitem__(name).append(str(value))
 
-    def parse_line(self, line):
-        match = self.HEADER_REGEX.match(line)
+    @staticmethod
+    def parse_line(line):
+        match = HEADER_REGEX.match(line)
 
         if not match:
             raise HeaderParseError(line)
@@ -165,9 +168,9 @@ class HTTPHeaders(defaultdict):
         name, value = match.groups()
 
         if not RFC1123_REGEX.match(value) and "," in value:
-                value = [v.strip() for v in value.split(",")]
+            value = [v.strip() for v in value.split(",")]
 
-        self.add(name, value)
+        return name, value
 
     def http_encode(self):
         string = ""
