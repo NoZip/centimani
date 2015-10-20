@@ -1,6 +1,9 @@
 import re
+import types
+
 from datetime import datetime
-from collections import defaultdict as MultiMap
+from collections import defaultdict
+from collections.abc import *
 
 
 # HTTP 1.1 status codes
@@ -71,9 +74,9 @@ STATUS_REASON = {
 WEEKDAY = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 MONTH = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
-REGEX_RFC1123 = re.compile(r"[A-Z][a-z]{2}, ([0-9]{1,2}) ([A-Z][a-z]{2}) ([0-9]{2}|[0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) GMT")
+RFC1123_REGEX = re.compile(r"[A-Z][a-z]{2}, ([0-9]{1,2}) ([A-Z][a-z]{2}) ([0-9]{2}|[0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) GMT")
 
-def rfc1123_datetime_print(dt):
+def rfc1123_datetime_encode(dt):
     return "{0}, {1} {2} {3} {4:02}:{5:02}:{6:02} {7}".format(
         WEEKDAY[dt.weekday()],
         dt.day,
@@ -85,8 +88,8 @@ def rfc1123_datetime_print(dt):
         "GMT"
     )
 
-def rfc1123_datetime_parse(string):
-    match = REGEX_RFC1123.match(string)
+def rfc1123_datetime_decode(string):
+    match = RFC1123_REGEX.match(string)
 
     if not match:
         raise ValueError("Date string not matching")
@@ -105,12 +108,12 @@ def rfc1123_datetime_parse(string):
 
 # Utility classes
 
-class HTTPHeaders(MultiMap):
+class HTTPHeaders(defaultdict):
     """
     Used to handle HTTP headers.
     """
 
-    HEADER_REGEX = re.compile(r"^([a-zA-Z-]+):(.+)$")
+    HEADER_REGEX = re.compile(r"^([\w-]+): *(.+) *$")
 
     def __init__(self, **kwargs):
         super().__init__(list)
@@ -126,6 +129,9 @@ class HTTPHeaders(MultiMap):
         Return one value if the header is unique, and a list othervise.
         """ 
 
+        if name not in self:
+            raise KeyError(name)
+
         item = self.__getitem__(name)
         
         if len(item) == 1:
@@ -138,7 +144,14 @@ class HTTPHeaders(MultiMap):
         Add one or multiples values to the headers.
         """
 
-        self.__getitem__(name).append(value)
+        assert(isinstance(name, str))
+
+        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+            self.__getitem__(name).extend(value)
+        elif isinstance(value, datetime):
+            self.__getitem__(name).append(rfc1123_datetime_encode(value))
+        else:
+            self.__getitem__(name).append(str(value))
 
     def parse_line(self, line):
         match = self.HEADER_REGEX.match(line)
@@ -146,8 +159,24 @@ class HTTPHeaders(MultiMap):
         if not match:
             raise ValueError("Header line not well formed: {}".format(line))
 
-        name, value = (s.strip() for s in line.split(':', maxsplit=1))
-        self.__getitem__(name).append(value)
+        name, value = match.groups()
+
+        if not RFC1123_REGEX.match(value) and "," in value:
+                value = [v.strip() for v in value.split(",")]
+
+        self.add(name, value)
+
+    def http_encode(self):
+        string = ""
+        for name, values in self.items():
+            if name == "Set-Cookie":
+                # Set-Cookie special case
+                for value in values:
+                    string += name + ": " + value + "\r\n"
+            else:
+                string += name + ": " + ", ".join(values) + "\r\n"
+
+        return string
 
 
 class Request:

@@ -32,23 +32,19 @@ class BaseHandler:
     def write_header(self, response):
         assert(response)
         
-        header = "HTTP/{0} {1} {2}\r\n".format(
+        status_line = "HTTP/{0} {1} {2}\r\n".format(
             response.version,
             response.status,
             STATUS_REASON[response.status]
         )
 
-        for name, value in response.headers.items():
-            header += "{0}: {1}\r\n".format(
-                name,
-                ", ".join(map(str, value))
-            )
+        response_headers = response.headers.http_encode()
 
-        header += "\r\n"
+        data = status_line + response_headers + "\r\n"
 
-        self.dispatcher.logger.debug(header)
+        self.dispatcher.logger.debug(data)
 
-        self.writer.write(header.encode("ascii"))
+        self.writer.write(data.encode("ascii"))
 
 class ErrorHandler(BaseHandler):
     def __init__(self, dispatcher, request, reader, writer):
@@ -142,13 +138,6 @@ class Dispatcher:
 
             self.logger.debug("{0!r} -> {1}".format(peername,request_line))
 
-            # parse headers
-            headers = HTTPHeaders()
-            line = yield from reader.readline()
-            while (line != b"\r\n"):
-                headers.parse_line(line.decode("ascii").strip())
-                line = yield from reader.readline()
-
             match = REQUEST_REGEX.match(request_line)
             
             if match is None:
@@ -165,6 +154,20 @@ class Dispatcher:
             url = urlsplit(url)
             path = url.path
             query = parse_qs(url.query)
+
+            # parse headers
+            try:
+                headers = HTTPHeaders()
+                line = yield from reader.readline()
+                while (line != b"\r\n"):
+                    headers.parse_line(line.decode("ascii").strip())
+                    line = yield from reader.readline()
+            except ValueError as error:
+                # Bad request, connection is closed after error is send
+                self.logger.debug("peer {0!r}: Headers parsing failed".format(peername))
+                handler = self.error_handler_factory(self, None, reader, writer)
+                yield from self.loop.create_task(handler.error(400))
+                break
 
             request = Request(version, method, path, query, headers)
 
