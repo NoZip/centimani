@@ -7,7 +7,14 @@ from asyncio import coroutine
 
 from centimani.httputils import *
 
+
+class ChunkParseError(Exception):
+    pass
+
 # Handlers
+
+CHUNK_HEADER_PATTERN = r"^([0-9A-F]+)((?:;[\w-]+=[\w-]+)*)$"
+CHUNK_HEADER_REGEX = re.compile(CHUNK_HEADER_PATTERN)
 
 class BaseHandler:
     def __init__(self, dispatcher, request, reader, writer):
@@ -18,16 +25,88 @@ class BaseHandler:
 
         self.is_body_read = False
 
+    @property
+    def is_chunked(self):
+        if "Transfert-Encoding" in self.request.headers:
+            return ("chunked" in self.request.headers["Transfert-Encoding"])
+        else:
+            return False
+
+    @property
+    def content_length(self):
+        if "Content-Length" in self.request.headers:
+            field_value = self.request.headers["Content-Length"]
+
+            if len(field_value) > 1:
+                # TODO
+                raise Exception("Duplicate content-length headers")
+
+            return int(field_value[0])
+
+        else:
+            return None
+    
+
     @coroutine
     def read_body(self):
-        assert(self.request)
-        
-        if (not self.is_body_read
-            and "Content-Length" in self.request.headers
-        ):
-            length = self.request.headers.get("Content-Length")
+        assert(not self.is_body_read)
+
+        content_length = self.content_length
+        if content_length:
             body = yield from self.reader.read(length)
+            self.is_body_read = True
             return body
+
+    @coroutine
+    def read_chunks(self):
+        """
+        TODO: test this
+        """
+        assert(not self.is_body_read)
+        assert(self.is_chunked)
+
+        content_length = 0
+
+        while True:
+            chunk_header = yield from self.reader.readline()
+            match = CHUNK_HEADER_REGEX.match(chunk_header.strip("\r\n"))
+
+            if not match:
+                raise ChunkParseError("chunk header malformed")
+
+            chunk_length, extensions = match.groups()
+
+            if chunk_length == 0:
+                # last chunk
+                break
+
+            chunk = self.reader.read(chunk_length)
+            yield chunk
+
+            content_length += chunk_length
+
+            check = self.reader.read(2)
+            if check != "\r\n":
+                raise ChunkParseError("chunk parsing failed")
+        
+        # parsing trailer headers
+        
+        line = ""
+        try:
+            line = yield from self.reader.readline()
+            while (line != b"\r\n"):
+                self.request.headers.parse_line(line.decode("ascii").strip())
+                line = yield from self.reader.readline()
+        except HeaderParseError as error:
+            raise ChunkParseError("trailer parsing failed")
+
+        check = self.reader.read(2)
+        if check != "\r\n":
+            raise ChunkParseError("chunk parsing failed")
+
+        self.request.headers["Content-Length"] = [content_length]
+        self.request.headers["Transfert-Encoding"].remove("chunked")
+
 
     def write_header(self, response):
         assert(response)
@@ -162,7 +241,7 @@ class Dispatcher:
                 while (line != b"\r\n"):
                     headers.parse_line(line.decode("ascii").strip())
                     line = yield from reader.readline()
-            except ValueError as error:
+            except HeaderParseError as error:
                 # Bad request, connection is closed after error is send
                 self.logger.debug("peer {0!r}: Headers parsing failed".format(peername))
                 handler = self.error_handler_factory(self, None, reader, writer)
