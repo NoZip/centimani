@@ -76,6 +76,7 @@ class BaseHandler:
                 raise ChunkParseError("chunk header malformed")
 
             chunk_length, extensions = match.groups()
+            chunk_length = int(chunk_length, base=16)
 
             if chunk_length == 0:
                 # last chunk
