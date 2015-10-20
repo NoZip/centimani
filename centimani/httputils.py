@@ -108,6 +108,9 @@ def rfc1123_datetime_decode(string):
 
 # Utility classes
 
+class HeaderParseError(Exception):
+    pass
+
 class HTTPHeaders(defaultdict):
     """
     Used to handle HTTP headers.
@@ -157,7 +160,7 @@ class HTTPHeaders(defaultdict):
         match = self.HEADER_REGEX.match(line)
 
         if not match:
-            raise ValueError("Header line not well formed: {}".format(line))
+            raise HeaderParseError(line)
 
         name, value = match.groups()
 
