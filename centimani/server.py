@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, unquote_plus, parse_qs
 from asyncio import coroutine
 
 from centimani.httputils import *
-
+from centimani.protocol import *
 
 class ChunkParseError(Exception):
     pass
@@ -92,11 +92,9 @@ class BaseHandler:
                 raise ChunkParseError("chunk parsing failed")
 
         # parsing trailer headers
-        
-        line = ""
         try:
-            line = yield from self.reader.readline()
-            while (line != b"\r\n"):
+            lines = yield from self.reader.read_until(b"\r\n\r\n")
+            for line in lines.split(b"\r\n"):
                 line = line.strip().decode("ascii")
                 name, value = self.request.headers.parse_line(line)
                 self.request.headers.add(name, value)
@@ -206,7 +204,8 @@ class Dispatcher:
                         yield from handler.read_body(devnull)
             
             try:
-                request_line = yield from asyncio.wait_for(reader.readline(), 90)
+                read_coroutine = reader.read_until(b"\r\n")
+                request_line = yield from asyncio.wait_for(read_coroutine, 90)
             except asyncio.TimeoutError as error:
                 # After request timeout, send an error response then close the connection
                 self.logger.debug("peer {0!r}: Timeout error".format(peername))
@@ -246,11 +245,11 @@ class Dispatcher:
             # parse headers
             try:
                 headers = HTTPHeaders()
-                line = yield from reader.readline()
-                while (line != b"\r\n"):
-                    name, value = headers.parse_line(line.decode("ascii").strip())
+                lines = yield from reader.read_until(b"\r\n\r\n")
+                for line in lines.split(b"\r\n"):
+                    line = line.decode("ascii").strip()
+                    name, value = headers.parse_line(line)
                     headers.add(name, value)
-                    line = yield from reader.readline()
             except HeaderParseError as error:
                 # Bad request, connection is closed after error is send
                 self.logger.debug("peer {0!r}: Headers parsing failed".format(peername))
@@ -301,7 +300,7 @@ class Dispatcher:
 
     @coroutine
     def listen(self, host="localhost", port=8080):
-        server = yield from asyncio.start_server(
+        server = yield from start_server(
             self.handle_connection,
             host=host,
             port=port,
