@@ -5,9 +5,9 @@ import logging
 
 from urllib.parse import urlsplit, unquote_plus, parse_qs
 from asyncio import coroutine
+from asyncioplus.iostream import *
 
 from centimani.httputils import *
-from centimani.protocol import *
 
 class ChunkParseError(Exception):
     pass
