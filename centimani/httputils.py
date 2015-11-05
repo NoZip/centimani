@@ -128,6 +128,13 @@ class HTTPHeaders(defaultdict):
 
             self.add(normalized_name, value)
 
+    @property
+    def is_chunked(self):
+        if "Transfert-encoding" in self:
+            return "chunked" in self.__getitem__["Transfert-encoding"]
+
+        return False
+
     def get(self, name):
         """
         Retrieves header value.
@@ -148,15 +155,18 @@ class HTTPHeaders(defaultdict):
         """
         Add one or multiples values to the headers.
         """
-
         assert(isinstance(name, str))
 
-        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
+        is_str = isinstance(value, str)
+
+        if isinstance(value, Iterable) and not is_str:
             self.__getitem__(name).extend(value)
         elif isinstance(value, datetime):
             self.__getitem__(name).append(rfc1123_datetime_encode(value))
-        else:
+        elif not is_str:
             self.__getitem__(name).append(str(value))
+        else:
+            self.__getitem__(name).append(value)
 
     @staticmethod
     def parse_line(line):
