@@ -68,10 +68,10 @@ class BaseHandler:
 
         body_size = 0
 
-        chunks_reader = ChunkTransfertReader(self.reader)
+        chuned_reader = ChunkedTransfertReader(self.reader)
         while True:
             try:
-                chunk = yield from chunks_reader.__anext__()
+                chunk = yield from chuned_reader.__anext__()
             except StopIteration:
                 break
 
