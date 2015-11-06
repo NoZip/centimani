@@ -1,13 +1,12 @@
 import re
-import types
 
 from datetime import datetime
 from collections import defaultdict
 from collections.abc import *
+from asyncio import coroutine
 
 
-# HTTP 1.1 status codes
-
+# HTTP/1.1 status reasons
 STATUS_REASON = {
     100: "Continue",
     101: "Switching Protocols",
@@ -69,7 +68,9 @@ STATUS_REASON = {
 }
 
 
-# RFC 1123 datetime functions
+#=============================#
+# RFC 1123 datetime functions #
+#=============================#
 
 WEEKDAY = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 MONTH = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -106,11 +107,15 @@ def rfc1123_datetime_decode(string):
     )
 
 
+#==========================#
+# Chunked transfert helper #
+#==========================#
+
 class ChunkedTransfertReader:
     """
     TODO: test this
     """
-    
+
     def __init__(self, reader):
         self._reader = reader
         self_eof = False
@@ -130,7 +135,9 @@ class ChunkedTransfertReader:
         return chunk
 
 
-# Utility classes
+#================#
+# HTTP Utilities #
+#================#
 
 class HeaderParseError(Exception):
     pass
@@ -142,15 +149,26 @@ HEADER_REGEX = re.compile(HEADER_PATTERN)
 class HTTPHeaders(defaultdict):
     """
     Used to handle HTTP headers.
+
+    >>> HTTPHeaders(content_length=23, transfert_encoding=["chunked", "gzip"])
+    {'Transfert-Encoding': ['chunked', 'gzip'], 'Content-Length': ['23']}
     """
 
     def __init__(self, **kwargs):
+        """
+        Initialize headers with named parameters.
+
+        Named parameters will be converted from "thing_header" to "Thing-Header"
+        in order to normalize headers names.
+        """
         super().__init__(list)
 
         for name, value in kwargs.items():
             normalized_name = "-".join(w.capitalize() for w in name.split("_"))
-
             self.add(normalized_name, value)
+
+    def __repr__(self):
+        return repr(dict(self))
 
     @property
     def is_chunked(self):
@@ -194,6 +212,10 @@ class HTTPHeaders(defaultdict):
 
     @staticmethod
     def parse_line(line):
+        """
+        Parse an header line, return a tuple (name, value).
+        """
+
         match = HEADER_REGEX.match(line)
 
         if not match:
@@ -204,9 +226,13 @@ class HTTPHeaders(defaultdict):
         if not RFC1123_REGEX.match(value) and "," in value:
             value = [v.strip() for v in value.split(",")]
 
-        return name, value
+        return (name, value)
 
     def http_encode(self):
+        """
+        Returns all headers as a string containing each header line.
+        """
+
         string = ""
         for name, values in self.items():
             if name == "Set-Cookie":

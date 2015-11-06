@@ -9,12 +9,16 @@ from asyncioplus.iostream import *
 
 from .httputils import *
 
-class ChunkParseError(Exception):
-    pass
 
-# Handlers
+#==================#
+# Handlers classes #
+#==================#
 
 class BaseHandler:
+    """
+    Base handler semantics.
+    """
+
     def __init__(self, dispatcher, request, reader, writer):
         self.dispatcher = dispatcher
         self.request = request
@@ -43,7 +47,6 @@ class BaseHandler:
 
         else:
             return None
-    
 
     @coroutine
     def read_body(self, stream):
@@ -81,7 +84,10 @@ class BaseHandler:
         self.is_body_read = True
 
     def write_header(self, response):
-        assert(response)
+        """
+        Send the HTTP header to the client.
+        """
+        assert isinstance(response, Response)
         
         status_line = "HTTP/{0} {1} {2}\r\n".format(
             response.version,
@@ -89,15 +95,21 @@ class BaseHandler:
             STATUS_REASON[response.status]
         )
 
-        response_headers = response.headers.http_encode()
-
-        data = status_line + response_headers + "\r\n"
+        headers = response.headers.http_encode()
+        data = status_line + headers + "\r\n"
+        self.writer.write(data.encode("ascii"))
 
         self.dispatcher.logger.debug(data)
 
-        self.writer.write(data.encode("ascii"))
 
 class ErrorHandler(BaseHandler):
+    """
+    Handle errors.
+
+    Can be subclassed to override the error method in order to change error
+    handling behavior.
+    """
+
     def __init__(self, dispatcher, request, reader, writer):
         super().__init__(dispatcher, request, reader, writer)
 
@@ -106,7 +118,6 @@ class ErrorHandler(BaseHandler):
         message_bin = message.encode("utf-8")
         
         response = Response(status=status, headers=headers)
-
         response.headers.add("Content-Length", len(message_bin))
 
         self.write_header(response)
@@ -116,6 +127,12 @@ class ErrorHandler(BaseHandler):
 HTTP11_METHODS = frozenset(("get", "head", "post", "options", "connect", "trace", "put", "patch", "delete"))
 
 class MetaRequestHandler(type):
+    """
+    Metaclass for all user-defined request handlers.
+
+    Populate the methods attribute of the request handler in order to easyly
+    acces to handler's allowed methods.
+    """
     def __init__(cls, name, bases, namespace):
         methods = set()
 
@@ -125,12 +142,18 @@ class MetaRequestHandler(type):
                 methods.add(method)
 
         cls.methods = frozenset(methods)
-        print(name, cls.methods)
+
 
 class RequestHandler(BaseHandler, metaclass=MetaRequestHandler):
-        pass
+    """
+    User defined request handler, must be subclassed.
+    """
+    pass
 
-# Main application
+
+#=============================#
+# Web server route dispatcher #
+#=============================#
 
 class RoutingError(Exception):
     pass
@@ -172,6 +195,10 @@ class Dispatcher:
                     else:
                         yield from handler.read_body(devnull)
             
+            #-----------------#
+            # Receive request #
+            #-----------------#
+
             try:
                 read_coroutine = reader.read_until(b"\r\n")
                 request_line = yield from asyncio.wait_for(read_coroutine, 90)
@@ -228,7 +255,10 @@ class Dispatcher:
 
             request = Request(version, method, path, query, headers)
 
-            #Routing
+            #-----------------#
+            # Request routing #
+            #-----------------#
+
             try:
                 request_handler_factory, args, kwargs = self.find_route(path)
             except RoutingError as error:
@@ -248,6 +278,10 @@ class Dispatcher:
                 handler = self.error_handler_factory(self, request, reader, writer)
                 yield from self.loop.create_task(handler.error(405, response_headers))
                 continue
+
+            #-------------------------#
+            # Request handler calling #
+            #-------------------------#
 
             handler = request_handler_factory(self, request, reader, writer)
             method_handler = getattr(handler, method.lower())
@@ -269,6 +303,10 @@ class Dispatcher:
 
     @coroutine
     def listen(self, host="localhost", port=8080):
+        """
+        Start the dispatcher from listening on given port, binded to given host.
+        """
+
         server = yield from start_server(
             self.handle_connection,
             host=host,
