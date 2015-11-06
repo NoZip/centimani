@@ -107,6 +107,74 @@ def rfc1123_datetime_decode(string):
     )
 
 
+#================#
+# Body producers #
+#================#
+
+class FileBodyProducer:
+    """
+    Body producer that handle a file on disk.
+    """
+
+    has_size = True
+
+    def __init__(self, filename, chunk_size = 2**16):
+        self.filename = filename
+        self.size = os.stat(filename).st_size
+
+        self._chunk_size = chunk_size
+
+    @coroutine
+    def write(self, writer, loop = None):
+        loop = loop or asyncio.get_event_loop()
+
+        with open(self.filename, "rb") as src:
+            src_socket = socket(fileno = src.fileno())
+
+            for chunk_index in range(self.file_size//self._chunk_size):
+                data = yield from loop.socket_recv(src, self._chunk_size)
+                writer.write(data)
+
+
+class StreamBodyProducer:
+    """
+    Body producer that handle streams.
+
+    If size is not given to the constructor, the client will assume that the
+    body will be transferred with the chunked encoding.
+    """
+
+    def __init__(self, reader, size = None, chunk_size = 2**16):
+        self.reader = reader
+        self.size = size
+
+        self._chunk_size = chunk_size
+
+    @property
+    def has_size(self):
+        return self.size is not None
+
+    @coroutine
+    def write(self, writer, loop = None):
+        loop = loop or asyncio.get_event_loop()
+
+        if self.has_size():
+            chunk_count, last_chunk_size = divmod(self.size, self._chunk_size)
+
+            for chunk_index in range(chunk_count):
+                data = yield from self.reader.read(self._chunk_size)
+                writer.write(data)
+
+            data = yield from self.reader.read(last_chunk_size)
+            writer.write(data)
+        else:
+            chunk = None
+            while chunk != b"":
+                chunk = yield from self.reader.read(self._chunk_size)
+                chunk = "{:X}\r\n".format(len(chunk)).encode("ascii") + chunk
+                writer.write(chunk)
+
+
 #==========================#
 # Chunked transfert helper #
 #==========================#
