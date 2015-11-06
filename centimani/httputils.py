@@ -131,9 +131,14 @@ class FileBodyProducer:
         with open(self.filename, "rb") as src:
             src_socket = socket(fileno = src.fileno())
 
-            for chunk_index in range(self.file_size//self._chunk_size):
+            chunk_count, last_chunk_size = divmod(self.size, self._chunk_size)
+
+            for chunk_index in range(chunk_count):
                 data = yield from loop.socket_recv(src, self._chunk_size)
                 writer.write(data)
+
+            data = yield from loop.socket_recv(src, last_chunk_size)
+            writer.write(data)
 
 
 class StreamBodyProducer:
