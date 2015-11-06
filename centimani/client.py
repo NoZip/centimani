@@ -17,18 +17,22 @@ from .httputils import *
 STATUS_LINE_PATTERN = r"HTTP/(\d+\.\d+) (\d{3}) (.+)"
 STATUS_LINE_REGEX = re.compile(STATUS_LINE_PATTERN)
 
-class Client:
-    def __init__(self, loop = None):
+class ClientConnection:
+    def __init__(self, user_agent = "Centimani/0.1", loop = None):
         self._loop = loop or asyncio.get_event_loop()
 
         self.reader = None
         self.writer = None
+        self.user_agent = user_agent
 
     @coroutine
     def open(self, host, port):
         """
         Open the connection to the server.
         """
+        self.host = host
+        self.port = port
+
         self.reader, self.writer = yield from open_connection(host, port, loop = self._loop)
 
     def close(self):
@@ -38,7 +42,9 @@ class Client:
         self.writer.close()
 
     def fetch(self,
-        request,
+        url,
+        method = "GET",
+        headers = None,
         body = None,
         body_producer = None,
         body_chunk_callback = None
@@ -63,31 +69,30 @@ class Client:
                 the response body will be None.
         """
 
+        request_headers = headers or HTTPHeaders()
+
         #--------------#
         # Send request #
         #--------------#
 
-        request.headers.set("User-Agent", "Centimani/0.1")
+        request_headers.set("Host", self.host + ":" + str(self.port))
+        request_headers.set("User-Agent", self.user_agent)
 
-        host, port = self.writer.get_extra_info("peername")
-        request.headers.set("Host", ":".join((host, str(port))))
-
-        if "Content-Length" not in request.headers:
+        if "Content-Length" not in request_headers:
             if body is not None:
-                request.headers.set("Content-Length", len(body))
+                request_headers.set("Content-Length", len(body))
             elif body_producer is None:
-                request.headers.set("Content-Length", 0)
+                request_headers.set("Content-Length", 0)
             elif body_producer.has_size:
-                request.headers.set("Content-Length", body_producer.size)
+                request_headers.set("Content-Length", body_producer.size)
             elif (
-                "Transfert-Encoding" not in request.headers
-                or "chunked" not in request.headers["Transfert-Encoding"]
+                "Transfert-Encoding" not in request_headers
+                or "chunked" not in request_headers["Transfert-Encoding"]
             ):
-                request.headers.set("Transfert-Encoding", "chunked")
+                request_headers.set("Transfert-Encoding", "chunked")
 
-        uri = urlunsplit(("", "", request.path, urlencode(request.query), ""))
-        header = "{} {} HTTP/{}\r\n".format(request.method, uri, request.version)
-        header += request.headers.http_encode()
+        header = "{} {} HTTP/1.1\r\n".format(method, url)
+        header += request_headers.http_encode()
         header += "\r\n"
 
         self.writer.write(header.encode("ascii"))
@@ -116,21 +121,21 @@ class Client:
 
         version, status, reason = match.groups()
 
-        headers = HTTPHeaders()
+        response_headers = HTTPHeaders()
         for line in header_lines:
             line = line.decode("ascii")
-            name, value = headers.parse_line(line)
-            headers.add(name, value)
+            name, value = response_headers.parse_line(line)
+            response_headers.add(name, value)
 
         #-------------------#
         # Get response body #
         #-------------------#
 
-        response = Response(version, status, headers)
+        response = Response(version, status, response_headers)
         body = BytesIO() if body_chunk_callback is None else None
 
-        if not headers.is_chunked:
-            body_size = int(headers.get("Content-Length"))
+        if not response_headers.is_chunked:
+            body_size = int(response_headers.get("Content-Length"))
             chunks_count, last_chunk_size = divmod(body_size, 2**16)
 
             for chunk_index in range(chunks_count):

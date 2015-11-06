@@ -92,8 +92,8 @@ class BaseHandler:
         )
 
         headers_addons = HTTPHeaders(
-            data = datetime.utcnow(),
-            server = "Centimani/0.1"
+            date = datetime.utcnow(),
+            server = self.dispatcher.server_agent
         )
 
         response.headers.update(headers_addons)
@@ -165,14 +165,22 @@ REQUEST_REGEX = re.compile(REQUEST_PATTERN)
 
 class Dispatcher:
 
-    def __init__(self, routes, loop=None, logger=None):
-        self.routes = routes
-        self.error_handler_factory = ErrorHandler
-        self.loop = loop or asyncio.get_event_loop()
+    def __init__(self,
+        routes,
+        error_handler_factory = ErrorHandler,
+        server_agent = "Centimani/0.1",
+        logger = None,
+        loop = None
+    ):
+        self._routes = routes
+        self._error_handler_factory = ErrorHandler
+        self._loop = loop or asyncio.get_event_loop()
+
+        self.server_agent = server_agent
         self.logger = logger or logging.getLogger("centimani.server")
 
     def find_route(self, path):
-        for pattern, request_handler_factory in self.routes:
+        for pattern, request_handler_factory in self._routes:
             match = pattern.match(path)
             if match:
                 return request_handler_factory, match.groups(), match.groupdict()
@@ -203,8 +211,8 @@ class Dispatcher:
             except asyncio.TimeoutError as error:
                 # After request timeout, send an error response then close the connection
                 self.logger.debug("peer {0!r}: Timeout error".format(peername))
-                handler = self.error_handler_factory(self, None, reader, writer)
-                yield from self.loop.create_task(handler.error(408))
+                handler = self._error_handler_factory(self, None, reader, writer)
+                yield from self._loop.create_task(handler.error(408))
                 break
             except ConnectionResetError as error:
                 self.logger.debug("peer {0!r}: Connection reset error".format(peername))
@@ -224,8 +232,8 @@ class Dispatcher:
             if match is None:
                 # Bad request, connection is closed after error is send
                 self.logger.debug("peer {0!r}: Request line not matching".format(peername))
-                handler = self.error_handler_factory(self, None, reader, writer)
-                yield from self.loop.create_task(handler.error(400))
+                handler = self._error_handler_factory(self, None, reader, writer)
+                yield from self._loop.create_task(handler.error(400))
                 break
 
             request_line = unquote_plus(request_line)
@@ -247,8 +255,8 @@ class Dispatcher:
             except HeaderParseError as error:
                 # Bad request, connection is closed after error is send
                 self.logger.debug("peer {0!r}: Headers parsing failed".format(peername))
-                handler = self.error_handler_factory(self, None, reader, writer)
-                yield from self.loop.create_task(handler.error(400))
+                handler = self._error_handler_factory(self, None, reader, writer)
+                yield from self._loop.create_task(handler.error(400))
                 break
 
             request = Request(version, method, path, query, headers)
@@ -262,8 +270,8 @@ class Dispatcher:
             except RoutingError as error:
                 # No route finded, send 404 not find error
                 self.logger.debug("Route not find: {0}".format(path))
-                handler = self.error_handler_factory(self, request, reader, writer)
-                yield from self.loop.create_task(handler.error(404))
+                handler = self._error_handler_factory(self, request, reader, writer)
+                yield from self._loop.create_task(handler.error(404))
                 continue
 
             if method.lower() not in request_handler_factory.methods:
@@ -273,8 +281,8 @@ class Dispatcher:
                     request_handler_factory.__name__
                 ))
                 response_headers = HTTPHeaders(allowed=request_handler_factory.methods)
-                handler = self.error_handler_factory(self, request, reader, writer)
-                yield from self.loop.create_task(handler.error(405, response_headers))
+                handler = self._error_handler_factory(self, request, reader, writer)
+                yield from self._loop.create_task(handler.error(405, response_headers))
                 continue
 
             #-------------------------#
@@ -285,10 +293,10 @@ class Dispatcher:
             method_handler = getattr(handler, method.lower())
 
             try:
-                yield from self.loop.create_task(method_handler(*args, **kwargs))
+                yield from self._loop.create_task(method_handler(*args, **kwargs))
             except Exception as error:
-                handler = self.error_handler_factory(self, request, reader, writer)
-                yield from self.loop.create_task(handler.error(500))
+                handler = self._error_handler_factory(self, request, reader, writer)
+                yield from self._loop.create_task(handler.error(500))
                 raise error
                 
             if "Connection" in request.headers and request.headers.get("Connection") == "close":
@@ -307,9 +315,9 @@ class Dispatcher:
 
         server = yield from start_server(
             self.handle_connection,
-            host=host,
-            port=port,
-            loop=self.loop
+            host = host,
+            port = port,
+            loop = self._loop
         )
 
         return server

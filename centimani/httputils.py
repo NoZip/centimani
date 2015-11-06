@@ -21,7 +21,7 @@ STATUS_REASON = {
     226: "IM Used",
 
     300: "Multiple Choices",
-    301: "Moved Permanentely",
+    301: "Moved Permanently",
     302: "Moved Temporarily",
     303: "See Other",
     304: "Not Modified",
