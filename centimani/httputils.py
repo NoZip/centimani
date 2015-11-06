@@ -106,6 +106,30 @@ def rfc1123_datetime_decode(string):
     )
 
 
+class ChunkedTransfertReader:
+    """
+    TODO: test this
+    """
+    
+    def __init__(self, reader):
+        self._reader = reader
+        self_eof = False
+
+    def __aiter__(self):
+        return self
+
+    @coroutine
+    def __anext__(self):
+        chunk_header = yield from self._reader.read_until(b"\r\n")
+        chunk_size = int(chunk_header, base = 16)
+
+        if chunk_size == 0:
+            raise StopIteration
+
+        chunk = yield from self._reader.read(chunk_size)
+        return chunk
+
+
 # Utility classes
 
 class HeaderParseError(Exception):

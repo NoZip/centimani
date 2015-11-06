@@ -7,15 +7,12 @@ from urllib.parse import urlsplit, unquote_plus, parse_qs
 from asyncio import coroutine
 from asyncioplus.iostream import *
 
-from centimani.httputils import *
+from .httputils import *
 
 class ChunkParseError(Exception):
     pass
 
 # Handlers
-
-CHUNK_HEADER_PATTERN = r"^([0-9A-F]+)((?:;[\w-]+=[\w-]+)*)$"
-CHUNK_HEADER_REGEX = re.compile(CHUNK_HEADER_PATTERN)
 
 class BaseHandler:
     def __init__(self, dispatcher, request, reader, writer):
@@ -66,47 +63,19 @@ class BaseHandler:
         assert(not self.is_body_read)
         assert(self.is_chunked)
 
-        content_length = 0
+        body_size = 0
 
+        chunks_reader = ChunkTransfertReader(self.reader)
         while True:
-            chunk_header = yield from self.reader.readline()
-            match = CHUNK_HEADER_REGEX.match(chunk_header.strip("\r\n"))
-
-            if not match:
-                raise ChunkParseError("chunk header malformed")
-
-            chunk_length, extensions = match.groups()
-            chunk_length = int(chunk_length, base=16)
-
-            if chunk_length == 0:
-                # last chunk
+            try:
+                chunk = yield from chunks_reader.__anext__()
+            except StopIteration:
                 break
 
-            chunk = self.reader.read(chunk_length)
-            stream.write(chunk)
+        stream.write(chunk)
+        body_size += len(chunk)
 
-            content_length += chunk_length
-
-            check = self.reader.read(2)
-            if check != "\r\n":
-                raise ChunkParseError("chunk parsing failed")
-
-        # parsing trailer headers
-        try:
-            lines = yield from self.reader.read_until(b"\r\n\r\n")
-            for line in lines.split(b"\r\n"):
-                line = line.strip().decode("ascii")
-                name, value = self.request.headers.parse_line(line)
-                self.request.headers.add(name, value)
-                line = yield from self.reader.readline()
-        except HeaderParseError as error:
-            raise ChunkParseError("trailer parsing failed")
-
-        check = self.reader.read(2)
-        if check != "\r\n":
-            raise ChunkParseError("chunk parsing failed")
-
-        self.request.headers["Content-Length"] = [content_length]
+        self.request.headers["Content-Length"] = [body_size]
         self.request.headers["Transfert-Encoding"].remove("chunked")
 
         self.is_body_read = True
