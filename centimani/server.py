@@ -3,6 +3,7 @@ import re
 import asyncio
 import logging
 
+from datetime import datetime
 from urllib.parse import urlsplit, unquote_plus, parse_qs
 from asyncio import coroutine
 from asyncioplus.iostream import *
@@ -95,8 +96,13 @@ class BaseHandler:
             STATUS_REASON[response.status]
         )
 
-        headers = response.headers.http_encode()
-        data = status_line + headers + "\r\n"
+        headers_addons = HTTPHeaders(
+            data = datetime.utcnow(),
+            server = "Centimani/0.1"
+        )
+
+        response.headers.update(headers_addons)
+        data = status_line + response.headers.http_encode() + "\r\n"
         self.writer.write(data.encode("ascii"))
 
         self.dispatcher.logger.debug(data)

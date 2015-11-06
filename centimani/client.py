@@ -67,18 +67,18 @@ class Client:
         # Send request #
         #--------------#
 
-        request.headers["User-Agent"] = ["Centimani/0.1"]
+        request.headers.set("User-Agent", "Centimani/0.1")
 
         host, port = self.writer.get_extra_info("peername")
-        request.headers["Host"] = [":".join((host, str(port)))]
+        request.headers.set("Host", ":".join((host, str(port))))
 
         if "Content-Length" not in request.headers:
             if body is not None:
-                request.headers.add("Content-Length", len(body))
+                request.headers.set("Content-Length", len(body))
             elif body_producer is None:
-                request.headers.add("Content-Length", 0)
+                request.headers.set("Content-Length", 0)
             elif body_producer.has_size:
-                request.headers.add("Content-Length", body_producer.size)
+                request.headers.set("Content-Length", body_producer.size)
             elif (
                 "Transfert-Encoding" not in request.headers
                 or "chunked" not in request.headers["Transfert-Encoding"]

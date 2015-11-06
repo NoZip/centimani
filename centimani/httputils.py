@@ -261,6 +261,14 @@ class HTTPHeaders(defaultdict):
         else:
             return item
 
+    def set(self, name, value):
+        """
+        Set an header field to an unique value.
+        """
+
+        self.__setitem__(name, [])
+        self.add(name, value)
+
     def add(self, name, value):
         """
         Add one or multiples values to the headers.
