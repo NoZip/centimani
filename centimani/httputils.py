@@ -245,8 +245,8 @@ class HTTPHeaders(defaultdict):
 
     @property
     def is_chunked(self):
-        if "Transfert-encoding" in self:
-            return "chunked" in self.__getitem__["Transfert-encoding"]
+        if "Transfert-Encoding" in self:
+            return "chunked" in self.__getitem__["Transfert-Encoding"]
 
         return False
 

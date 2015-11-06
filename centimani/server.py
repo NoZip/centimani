@@ -53,36 +53,31 @@ class BaseHandler:
     def read_body(self, stream):
         assert(not self.is_body_read)
 
-        content_length = self.content_length
-        if content_length:
-            body = yield from self.reader.read(length)
-            stream.write(body)
-            self.is_body_read = True
+        if not self.request.headers.is_chunked:
+            body_size = int(self.request.headers.get("Content-Length"))
 
-    @coroutine
-    def read_chunks(self, stream):
-        """
-        TODO: test this
-        """
-        assert(not self.is_body_read)
-        assert(self.is_chunked)
+            if body_size > 0:
+                body = yield from self.reader.read(length)
+                stream.write(body)
 
-        body_size = 0
+        else:
+            body_size = 0
 
-        chuned_reader = ChunkedTransfertReader(self.reader)
-        while True:
-            try:
-                chunk = yield from chuned_reader.__anext__()
-            except StopIteration:
-                break
+            chuned_reader = ChunkedTransfertReader(self.reader)
+            while True:
+                try:
+                    chunk = yield from chuned_reader.__anext__()
+                except StopIteration:
+                    break
 
-        stream.write(chunk)
-        body_size += len(chunk)
+                stream.write(chunk)
+                body_size += len(chunk)
 
-        self.request.headers["Content-Length"] = [body_size]
-        self.request.headers["Transfert-Encoding"].remove("chunked")
+            self.request.headers.set("Content-Length", body_size)
+            self.request.headers.set("Transfert-Encoding", "chunked")
 
         self.is_body_read = True
+
 
     def write_header(self, response):
         """
@@ -196,10 +191,7 @@ class Dispatcher:
             if handler and handler.request and not handler.is_body_read:
                 # read previous request's body if not read
                 with open(os.devnull, "w") as devnull:
-                    if handler.is_chunked:
-                        yield from handler.read_chunks(devnull)
-                    else:
-                        yield from handler.read_body(devnull)
+                    yield from handler.read_body(devnull)
             
             #-----------------#
             # Receive request #

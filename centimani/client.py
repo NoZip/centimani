@@ -83,7 +83,7 @@ class Client:
                 "Transfert-Encoding" not in request.headers
                 or "chunked" not in request.headers["Transfert-Encoding"]
             ):
-                request.headers["Transfert-Encoding"].insert(0, "chunked")
+                request.headers.set("Transfert-Encoding", "chunked")
 
         uri = urlunsplit(("", "", request.path, urlencode(request.query), ""))
         header = "{} {} HTTP/{}\r\n".format(request.method, uri, request.version)
