@@ -218,12 +218,8 @@ class ClientConnection:
             if "Content-Length" in response_headers:
                 del response_headers["Content-Length"]
 
-            # TODO: chunked + other encodings support
-            if len(transfert_encoding) > 1:
-                self.close()
-                raise NotImplementedError
-
-            chunks_reader = ChunkTransfertReader(self.reader)
+            encoding_chain = transfert_encoding[:-1]
+            chunks_reader = ChunkTransfertReader(self.reader, encoding_chain)
             while True:
                 try:
                     chunk = yield from chunks_reader.__anext__()

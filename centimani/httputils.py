@@ -1,4 +1,6 @@
 import re
+import zlib
+import gzip
 
 from datetime import datetime
 from collections import defaultdict
@@ -189,9 +191,22 @@ class ChunkedTransfertReader:
     TODO: test this
     """
 
-    def __init__(self, reader):
+    SUPPORTED_ENCODINGS = {
+        "deflate": zlib.decompress,
+        "gzip": gzip.decompress,
+        "x-gzip": gzip.decompress
+    }
+
+    def __init__(self, reader, encoding_chain = []):
         self._reader = reader
         self_eof = False
+
+        self._decoding_chain = []
+        for coding in reversed(encoding_chain):
+            if coding not in self.SUPPORTED_ENCODINGS:
+                raise Exception()
+
+            self._decoding_chain.append(self.SUPPORTED_ENCODINGS[coding])
 
     def __aiter__(self):
         return self
@@ -205,6 +220,10 @@ class ChunkedTransfertReader:
             raise StopIteration
 
         chunk = yield from self._reader.read(chunk_size)
+
+        for decoder in  self._decoding_chain:
+            chunk = decoder(chunk)
+
         return chunk
 
 
