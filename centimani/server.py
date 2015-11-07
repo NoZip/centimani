@@ -28,37 +28,18 @@ class BaseHandler:
 
         self.is_body_read = False
 
-    @property
-    def is_chunked(self):
-        if "Transfert-Encoding" in self.request.headers:
-            return ("chunked" in self.request.headers["Transfert-Encoding"])
-        else:
-            return False
-
-    @property
-    def content_length(self):
-        if "Content-Length" in self.request.headers:
-            field_value = self.request.headers["Content-Length"]
-
-            if len(field_value) > 1:
-                # TODO
-                raise Exception("Duplicate content-length headers")
-
-            return int(field_value[0])
-
-        else:
-            return None
-
     @coroutine
     def read_body(self, stream):
         assert(not self.is_body_read)
 
         if not self.request.headers.is_chunked:
-            body_size = int(self.request.headers.get("Content-Length"))
+            # no Content-Length headers = no request body
+            if "Content-Length" in self.request.headers:
+                body_size = int(self.request.headers.get_one("Content-Length"))
 
-            if body_size > 0:
-                body = yield from self.reader.read(length)
-                stream.write(body)
+                if body_size > 0:
+                    body = yield from self.reader.read(length)
+                    stream.write(body)
 
         else:
             body_size = 0
@@ -258,6 +239,16 @@ class Dispatcher:
                 handler = self._error_handler_factory(self, None, reader, writer)
                 yield from self._loop.create_task(handler.error(400))
                 break
+
+            if "Content-Length" in headers:
+                if "Transfert-Encoding" in headers:
+                    del headers["Content-Length"]
+                elif len(headers["Content-Length"]) > 1:
+                    # Multiple Content-Length headers, error 400 is send
+                    self.logger.debug("peer {0!r}: multiple Content-Length headers".format(peername))
+                    handler = self._error_handler_factory(self, request, reader, writer)
+                    yield from self._loop.create_task(handler.error(400))
+                    break
 
             request = Request(version, method, path, query, headers)
 

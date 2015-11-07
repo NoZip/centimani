@@ -250,7 +250,7 @@ class HTTPHeaders(defaultdict):
 
         return False
 
-    def get(self, name):
+    def get_one(self, name):
         """
         Retrieves header value.
         Return one value if the header is unique, and a list othervise.
@@ -259,12 +259,12 @@ class HTTPHeaders(defaultdict):
         if name not in self:
             raise KeyError(name)
 
-        item = self.__getitem__(name)
+        value = self.__getitem__(name)
         
-        if len(item) == 1:
-            return item[0]
+        if len(value) == 1:
+            return value[0]
         else:
-            return item
+            raise ValueError(value)
 
     def set(self, name, value):
         """

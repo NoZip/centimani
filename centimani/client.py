@@ -21,9 +21,23 @@ class ClientConnection:
     def __init__(self, user_agent = "Centimani/0.1", loop = None):
         self._loop = loop or asyncio.get_event_loop()
 
+        self.is_closed = True
         self.reader = None
         self.writer = None
         self.user_agent = user_agent
+
+    @staticmethod
+    def _has_body(method, status):
+        if method == "HEAD":
+            return False
+        elif 100 <= status < 200:
+            return False
+        elif status in frozenset({204, 304}):
+            return False
+        elif method == "CONNECT" and 200 <= status < 300:
+            return False
+
+        return True
 
     @coroutine
     def open(self, host, port):
@@ -35,11 +49,14 @@ class ClientConnection:
 
         self.reader, self.writer = yield from open_connection(host, port, loop = self._loop)
 
+        self.is_closed = False
+
     def close(self):
         """
         Close the connection with the server.
         """
         self.writer.close()
+        self.is_closed = True
 
     def fetch(self,
         url,
@@ -68,6 +85,7 @@ class ClientConnection:
                 of the response body is received. If body_chunk_callback is set
                 the response body will be None.
         """
+        assert not self.is_closed
 
         request_headers = headers or HTTPHeaders()
 
@@ -77,6 +95,9 @@ class ClientConnection:
 
         request_headers.set("Host", self.host + ":" + str(self.port))
         request_headers.set("User-Agent", self.user_agent)
+
+        if "Connection" not in request_headers:
+            request_headers.set("Connection", "keep-alive")
 
         if "Content-Length" not in request_headers:
             if body is not None:
@@ -112,14 +133,22 @@ class ClientConnection:
         status_line, *header_lines = header.split(b"\r\n")
 
         if not status_line:
+            self.close()
             raise Exception()
 
         match = STATUS_LINE_REGEX.match(status_line.decode("ascii"))
 
         if not match:
+            self.close()
             raise Exception()
 
         version, status, reason = match.groups()
+        major_version, minor_version = map(int, version.split(".", maxsplit = 1))
+        status = int(status, base = 10)
+
+        if major_version != 1:
+            self.close()
+            raise Exception()
 
         response_headers = HTTPHeaders()
         for line in header_lines:
@@ -134,26 +163,66 @@ class ClientConnection:
         response = Response(version, status, response_headers)
         body = BytesIO() if body_chunk_callback is None else None
 
-        if not response_headers.is_chunked:
-            body_size = int(response_headers.get("Content-Length"))
-            chunks_count, last_chunk_size = divmod(body_size, 2**16)
+        # some responses has no body, no matter what header is present
+        if not self._has_body(method, status):
+            return (response, None)
 
-            for chunk_index in range(chunks_count):
-                chunk = yield from self.reader.read(2**16)
+        transfert_encoding = response_headers.get("Transfert-Encoding", [])
+        content_length = response_headers.get("Content-Length", [])
+
+        if "chunked" not in transfert_encoding:
+            # no content_length: read until closing
+            # TODO
+            if not content_length:
+                self.close()
+                raise NotImplementedError
+
+            # multiple Content-Length generate an error
+            elif len(content_length) > 1:
+                self.close()
+                raise Exception()
+
+            else:
+                body_size = int(content_length[0])
+
+                # non chunked transfert encoding
+                # TODO
+                if transfert_encoding:
+                    self.close()
+                    raise NotImplementedError
+
+                chunks_count, last_chunk_size = divmod(body_size, 2**16)
+
+                for chunk_index in range(chunks_count):
+                    chunk = yield from self.reader.read(2**16)
+
+                    if body_chunk_callback is None:
+                        body.write(chunk)
+                    else:
+                        body_chunk_callback(chunk)
+
+                last_chunk = yield from self.reader.read(last_chunk_size)
 
                 if body_chunk_callback is None:
-                    body.write(chunk)
+                    body.write(last_chunk)
                 else:
-                    body_chunk_callback(chunk)
-
-            last_chunk = yield from self.reader.read(last_chunk_size)
-
-            if body_chunk_callback is None:
-                body.write(last_chunk)
-            else:
-                body_chunk_callback(last_chunk)
+                    body_chunk_callback(last_chunk)
 
         else:
+            # chunked is not the final encoding: read until closing
+            # TODO
+            if transfert_encoding[-1] != "chunked":
+                self.close()
+                raise NotImplementedError
+
+            if "Content-Length" in response_headers:
+                del response_headers["Content-Length"]
+
+            # TODO: chunked + other encodings support
+            if len(transfert_encoding) > 1:
+                self.close()
+                raise NotImplementedError
+
             chunks_reader = ChunkTransfertReader(self.reader)
             while True:
                 try:
@@ -165,5 +234,9 @@ class ClientConnection:
                     body.write(chunk)
                 else:
                     body_chunk_callback(chunk)
+
+
+        if "close" in response_headers.get("Connection", []):
+            self.close()
 
         return (response, body)
