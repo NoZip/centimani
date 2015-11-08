@@ -8,7 +8,7 @@ from asyncio import coroutine
 from asyncioplus.iostream import *
 
 from .httputils import *
-from.compression import *
+from .compression import *
 
 
 #===================#
@@ -96,6 +96,7 @@ class ClientConnection:
 
         request_headers.set("Host", self.host + ":" + str(self.port))
         request_headers.set("User-Agent", self.user_agent)
+        request_headers.add("Accept-Encoding", SUPPORTED_COMPRESSIONS)
 
         if "Connection" not in request_headers:
             request_headers.set("Connection", "keep-alive")
