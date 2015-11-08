@@ -8,6 +8,7 @@ from asyncio import coroutine
 from asyncioplus.iostream import *
 
 from .httputils import *
+from.compression import *
 
 
 #===================#
@@ -182,33 +183,24 @@ class ClientConnection:
                 self.close()
                 raise Exception()
 
-            else:
-                body_size = int(content_length[0])
+            body_size = int(content_length[0])
+            body_reader = BodyReader(self.reader, body_size)
 
-                # non chunked transfert encoding
-                if transfert_encoding:
-                    data = yield from self.reader.read(body_size)
-                    decoding_chain = [SUPPORTED_ENCODINGS[name] for name in reversed(transfert_encoding)]
-                    for decoder in decoding_chain:
-                        data = decoder(data)
+            # non chunked transfert encoding
+            if transfert_encoding:
+                body_reader = DecompressReaderPipe(body_reader, transfert_encoding)
 
+            running = True
+            while running:
+                try:
+                    chunk = yield from body_reader.__anext__()
+                except StopAsyncIteration:
+                    running = False
                 else:
-                    chunks_count, last_chunk_size = divmod(body_size, 2**16)
-
-                    for chunk_index in range(chunks_count):
-                        chunk = yield from self.reader.read(2**16)
-
-                        if body_chunk_callback is None:
-                            body.write(chunk)
-                        else:
-                            body_chunk_callback(chunk)
-
-                    last_chunk = yield from self.reader.read(last_chunk_size)
-
                     if body_chunk_callback is None:
-                        body.write(last_chunk)
+                        body.write(chunk)
                     else:
-                        body_chunk_callback(last_chunk)
+                        body_chunk_callback(chunk)
 
         else:
             # chunked is not the final encoding: read until closing
@@ -221,17 +213,22 @@ class ClientConnection:
                 del response_headers["Content-Length"]
 
             encoding_chain = transfert_encoding[:-1]
-            chunks_reader = ChunkTransfertReader(self.reader, encoding_chain)
-            while True:
+            chunks_reader = ChunkTransfertReader(self.reader)
+
+            if encoding_chain:
+                chunks_reader = DecompressReaderPipe(chunks_reader, encoding_chain)
+
+            running = True
+            while running:
                 try:
                     chunk = yield from chunks_reader.__anext__()
-                except StopIteration:
-                    break
-
-                if body_chunk_callback is None:
-                    body.write(chunk)
+                except StopAsyncIteration:
+                    running = False
                 else:
-                    body_chunk_callback(chunk)
+                    if body_chunk_callback is None:
+                        body.write(chunk)
+                    else:
+                        body_chunk_callback(chunk)
 
 
         if "close" in response_headers.get("Connection", []):
