@@ -2,6 +2,7 @@ import re
 import zlib
 import gzip
 
+from io import DEFAULT_BUFFER_SIZE
 from datetime import datetime
 from collections import defaultdict
 from collections.abc import *
@@ -193,27 +194,16 @@ class StreamBodyProducer:
 # Chunked transfert helper #
 #==========================#
 
+class StopAsyncIteration(Exception):
+    pass
+
 class ChunkedTransfertReader:
     """
     TODO: test this
     """
 
-    SUPPORTED_ENCODINGS = {
-        "deflate": zlib.decompress,
-        "gzip": gzip.decompress,
-        "x-gzip": gzip.decompress
-    }
-
-    def __init__(self, reader, encoding_chain = []):
+    def __init__(self, reader):
         self._reader = reader
-        self_eof = False
-
-        self._decoding_chain = []
-        for coding in reversed(encoding_chain):
-            if coding not in SUPPORTED_ENCODINGS:
-                raise Exception()
-
-            self._decoding_chain.append(SUPPORTED_ENCODINGS[coding])
 
     def __aiter__(self):
         return self
@@ -224,12 +214,42 @@ class ChunkedTransfertReader:
         chunk_size = int(chunk_header, base = 16)
 
         if chunk_size == 0:
-            raise StopIteration
+            raise StopAsyncIteration
+
+        chunk = yield from self._reader.read(chunk_size)
+        return chunk
+
+
+class BodyReader:
+    def __init__(self, reader, body_size = None):
+        self._reader = reader
+        self._body_size = body_size
+        
+        if self._body_size:
+            self._chunk_count, self._last_chunk_size = divmod(self._body_size, DEFAULT_BUFFER_SIZE)
+
+        self._chunk_index = 0
+
+    @coroutine
+    def __aiter__(self):
+        return self
+
+    @coroutine
+    def __anext__(self):
+        if self._body_size and self._chunk_index > self._chunk_count:
+            raise StopAsyncIteration
+
+        chunk_size = DEFAULT_BUFFER_SIZE
+
+        if self._body_size and self._chunk_index == self._chunk_count:
+            chunk_size = self._last_chunk_size
 
         chunk = yield from self._reader.read(chunk_size)
 
-        for decoder in  self._decoding_chain:
-            chunk = decoder(chunk)
+        if chunk == b"":
+            raise StopAsyncIteration
+
+        self._chunk_index += 1
 
         return chunk
 
