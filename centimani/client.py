@@ -186,27 +186,29 @@ class ClientConnection:
                 body_size = int(content_length[0])
 
                 # non chunked transfert encoding
-                # TODO
                 if transfert_encoding:
-                    self.close()
-                    raise NotImplementedError
+                    data = yield from self.reader.read(body_size)
+                    decoding_chain = [SUPPORTED_ENCODINGS[name] for name in reversed(transfert_encoding)]
+                    for decoder in decoding_chain:
+                        data = decoder(data)
 
-                chunks_count, last_chunk_size = divmod(body_size, 2**16)
+                else:
+                    chunks_count, last_chunk_size = divmod(body_size, 2**16)
 
-                for chunk_index in range(chunks_count):
-                    chunk = yield from self.reader.read(2**16)
+                    for chunk_index in range(chunks_count):
+                        chunk = yield from self.reader.read(2**16)
+
+                        if body_chunk_callback is None:
+                            body.write(chunk)
+                        else:
+                            body_chunk_callback(chunk)
+
+                    last_chunk = yield from self.reader.read(last_chunk_size)
 
                     if body_chunk_callback is None:
-                        body.write(chunk)
+                        body.write(last_chunk)
                     else:
-                        body_chunk_callback(chunk)
-
-                last_chunk = yield from self.reader.read(last_chunk_size)
-
-                if body_chunk_callback is None:
-                    body.write(last_chunk)
-                else:
-                    body_chunk_callback(last_chunk)
+                        body_chunk_callback(last_chunk)
 
         else:
             # chunked is not the final encoding: read until closing

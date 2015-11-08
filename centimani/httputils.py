@@ -70,6 +70,13 @@ STATUS_REASON = {
 }
 
 
+SUPPORTED_ENCODINGS = {
+    "deflate": zlib.decompress,
+    "gzip": gzip.decompress,
+    "x-gzip": gzip.decompress
+}
+
+
 #=============================#
 # RFC 1123 datetime functions #
 #=============================#
@@ -203,10 +210,10 @@ class ChunkedTransfertReader:
 
         self._decoding_chain = []
         for coding in reversed(encoding_chain):
-            if coding not in self.SUPPORTED_ENCODINGS:
+            if coding not in SUPPORTED_ENCODINGS:
                 raise Exception()
 
-            self._decoding_chain.append(self.SUPPORTED_ENCODINGS[coding])
+            self._decoding_chain.append(SUPPORTED_ENCODINGS[coding])
 
     def __aiter__(self):
         return self
