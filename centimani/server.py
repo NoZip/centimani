@@ -38,18 +38,30 @@ class BaseHandler:
                 body_size = int(self.request.headers.get_one("Content-Length"))
 
                 if body_size > 0:
-                    body = yield from self.reader.read(length)
-                    stream.write(body)
+                    body_reader = BodyReader(self.reader, body_size)
+
+                    running = True
+                    while running:
+                        try:
+                            chunk = yield from body_reader.__anext__()
+                        except StopAsyncIteration:
+                            running = False
+                        else:
+                            stream.write(chunk)
 
         else:
             body_size = 0
 
             chuned_reader = ChunkedTransfertReader(self.reader)
-            while True:
+
+            running = True
+            while running:
                 try:
                     chunk = yield from chuned_reader.__anext__()
-                except StopIteration:
-                    break
+                except StopAsyncIteration:
+                    running = False
+                else:
+                    stream.write(chunk)
 
                 stream.write(chunk)
                 body_size += len(chunk)
@@ -179,7 +191,7 @@ class Dispatcher:
         while True:
             if handler and handler.request and not handler.is_body_read:
                 # read previous request's body if not read
-                with open(os.devnull, "w") as devnull:
+                with open(os.devnull, "wb") as devnull:
                     yield from handler.read_body(devnull)
             
             #-----------------#
