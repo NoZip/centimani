@@ -11,6 +11,22 @@ from asyncioplus.iostream import *
 from .httputils import *
 
 
+class Request:
+    def __init__(self, method="GET", path="/", query={}, headers=None, version="1.1"):
+        self.method = method
+        self.path = path
+        self.query = query
+        self.headers = headers or HTTPHeaders()
+        self.version = version
+
+
+class Response:
+    def __init__(self, status, headers = None, version = "1.1"):
+        self.status = status
+        self.headers = headers or HTTPHeaders()
+        self.version = version
+
+
 #==================#
 # Handlers classes #
 #==================#
@@ -237,14 +253,15 @@ class Dispatcher:
             path = url.path
             query = parse_qs(url.query)
 
+            request = Request(method, path, query, version = version)
+
             # parse headers
             try:
-                headers = HTTPHeaders()
                 lines = yield from reader.read_until(b"\r\n\r\n")
                 for line in lines.split(b"\r\n"):
                     line = line.decode("ascii").strip()
-                    name, value = headers.parse_line(line)
-                    headers.add(name, value)
+                    name, value = request.headers.parse_line(line)
+                    request.headers.add(name, value)
             except HeaderParseError as error:
                 # Bad request, connection is closed after error is send
                 self.logger.debug("peer {0!r}: Headers parsing failed".format(peername))
@@ -252,17 +269,15 @@ class Dispatcher:
                 yield from self._loop.create_task(handler.error(400))
                 break
 
-            if "Content-Length" in headers:
-                if "Transfert-Encoding" in headers:
-                    del headers["Content-Length"]
-                elif len(headers["Content-Length"]) > 1:
+            if "Content-Length" in request.headers:
+                if "Transfert-Encoding" in request.headers:
+                    del request.headers["Content-Length"]
+                elif len(request.headers["Content-Length"]) > 1:
                     # Multiple Content-Length headers, error 400 is send
                     self.logger.debug("peer {0!r}: multiple Content-Length headers".format(peername))
                     handler = self._error_handler_factory(self, request, reader, writer)
                     yield from self._loop.create_task(handler.error(400))
                     break
-
-            request = Request(version, method, path, query, headers)
 
             #-----------------#
             # Request routing #
