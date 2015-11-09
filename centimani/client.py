@@ -11,6 +11,25 @@ from .httputils import *
 from .compression import *
 
 
+#=================#
+# HTTP structures #
+#=================#
+
+class Request:
+    def __init__(self, url, method = "GET", headers = None, version = "1.1"):
+        self.uel = url
+        self.headers = headers or HTTPHeaders()
+        self.method = method
+        self.version = version
+
+class Response:
+    def __init__(self, request, status, headers = None, version = "1.1"):
+        self.request = request
+        self.status = status
+        self.headers = headers or HTTPHeaders()
+        self.version = version
+
+
 #===================#
 # Async HTTP client #
 #===================#
@@ -88,34 +107,34 @@ class ClientConnection:
         """
         assert not self.is_closed
 
-        request_headers = headers or HTTPHeaders()
+        request = Request(url, method, headers)
 
         #--------------#
         # Send request #
         #--------------#
 
-        request_headers.set("Host", self.host + ":" + str(self.port))
-        request_headers.set("User-Agent", self.user_agent)
-        request_headers.add("Accept-Encoding", SUPPORTED_COMPRESSIONS)
+        request.headers.set("Host", self.host + ":" + str(self.port))
+        request.headers.set("User-Agent", self.user_agent)
+        request.headers.add("Accept-Encoding", SUPPORTED_COMPRESSIONS)
 
-        if "Connection" not in request_headers:
-            request_headers.set("Connection", "keep-alive")
+        if "Connection" not in request.headers:
+            request.headers.set("Connection", "keep-alive")
 
-        if "Content-Length" not in request_headers:
+        if "Content-Length" not in request.headers:
             if body is not None:
-                request_headers.set("Content-Length", len(body))
+                request.headers.set("Content-Length", len(body))
             elif body_producer is None:
-                request_headers.set("Content-Length", 0)
+                request.headers.set("Content-Length", 0)
             elif body_producer.has_size:
-                request_headers.set("Content-Length", body_producer.size)
+                request.headers.set("Content-Length", body_producer.size)
             elif (
-                "Transfert-Encoding" not in request_headers
-                or "chunked" not in request_headers["Transfert-Encoding"]
+                "Transfert-Encoding" not in request.headers
+                or "chunked" not in request.headers["Transfert-Encoding"]
             ):
-                request_headers.set("Transfert-Encoding", "chunked")
+                request.headers.set("Transfert-Encoding", "chunked")
 
-        header = "{} {} HTTP/1.1\r\n".format(method, url)
-        header += request_headers.http_encode()
+        header = "{} {} HTTP/{}\r\n".format(method, url, request.version)
+        header += request.headers.http_encode()
         header += "\r\n"
 
         self.writer.write(header.encode("ascii"))
@@ -152,25 +171,26 @@ class ClientConnection:
             self.close()
             raise Exception()
 
-        response_headers = HTTPHeaders()
+        response = Response(request, status, version = version)
+
+        response.headers = HTTPHeaders()
         for line in header_lines:
             line = line.decode("ascii")
-            name, value = response_headers.parse_line(line)
-            response_headers.add(name, value)
+            name, value = response.headers.parse_line(line)
+            response.headers.add(name, value)
 
         #-------------------#
         # Get response body #
         #-------------------#
 
-        response = Response(version, status, response_headers)
         body = BytesIO() if body_chunk_callback is None else None
 
         # some responses has no body, no matter what header is present
         if not self._has_body(method, status):
             return (response, None)
 
-        transfert_encoding = response_headers.get("Transfert-Encoding", [])
-        content_length = response_headers.get("Content-Length", [])
+        transfert_encoding = response.headers.get("Transfert-Encoding", [])
+        content_length = response.headers.get("Content-Length", [])
 
         if "chunked" not in transfert_encoding:
             # no content_length: read until closing
@@ -210,8 +230,8 @@ class ClientConnection:
                 self.close()
                 raise NotImplementedError
 
-            if "Content-Length" in response_headers:
-                del response_headers["Content-Length"]
+            if "Content-Length" in response.headers:
+                del response.headers["Content-Length"]
 
             encoding_chain = transfert_encoding[:-1]
             chunks_reader = ChunkTransfertReader(self.reader)
@@ -232,7 +252,7 @@ class ClientConnection:
                         body_chunk_callback(chunk)
 
 
-        if "close" in response_headers.get("Connection", []):
+        if "close" in response.headers.get("Connection", []):
             self.close()
 
         return (response, body)
