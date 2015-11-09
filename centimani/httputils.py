@@ -370,33 +370,3 @@ class HTTPHeaders(defaultdict):
                 string += name + ": " + ", ".join(values) + "\r\n"
 
         return string
-
-
-class Request:
-    __slots__ = ("version", "method", "path", "query", "headers")
-
-    def __init__(self,
-        version="1.1",
-        method="GET",
-        path="/",
-        query={},
-        headers=None
-    ):
-        self.version = version
-        self.method = method
-        self.path = path
-        self.query = query
-        self.headers = headers or HTTPHeaders()
-
-
-class Response:
-    __slots__ = ("version", "status", "headers")
-
-    def __init__(self,
-        version="1.1",
-        status=200,
-        headers=None
-    ):
-        self.version = version
-        self.status = status
-        self.headers = headers or HTTPHeaders()
