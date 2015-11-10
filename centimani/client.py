@@ -205,7 +205,7 @@ class ClientConnection:
                 raise Exception()
 
             body_size = int(content_length[0])
-            body_reader = BodyReader(self.reader, body_size)
+            body_reader = BlockReaderIterator(self.reader, body_size)
 
             # non chunked transfert encoding
             if transfert_encoding:
@@ -234,10 +234,10 @@ class ClientConnection:
                 del response.headers["Content-Length"]
 
             encoding_chain = transfert_encoding[:-1]
-            chunks_reader = ChunkTransfertReader(self.reader)
+            chunks_reader = ChunkTransfertIterator(self.reader)
 
             if encoding_chain:
-                chunks_reader = DecompressReaderPipe(chunks_reader, encoding_chain)
+                chunks_reader = DecompressPipe(chunks_reader, encoding_chain)
 
             running = True
             while running:

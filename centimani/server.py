@@ -7,6 +7,7 @@ from datetime import datetime
 from urllib.parse import urlsplit, unquote_plus, parse_qs
 from asyncio import coroutine
 from asyncioplus.iostream import *
+from asyncioplus.utils import *
 
 from .httputils import *
 
@@ -54,7 +55,7 @@ class BaseHandler:
                 body_size = int(self.request.headers.get_one("Content-Length"))
 
                 if body_size > 0:
-                    body_reader = BodyReader(self.reader, body_size)
+                    body_reader = BlockReaderIterator(self.reader, body_size)
 
                     running = True
                     while running:
@@ -68,7 +69,7 @@ class BaseHandler:
         else:
             body_size = 0
 
-            chuned_reader = ChunkedTransfertReader(self.reader)
+            chuned_reader = ChunkedTransfertIterator(self.reader)
 
             running = True
             while running:
@@ -83,7 +84,7 @@ class BaseHandler:
                 body_size += len(chunk)
 
             self.request.headers.set("Content-Length", body_size)
-            self.request.headers.set("Transfert-Encoding", "chunked")
+            self.request.headers["Transfert-Encoding"].remove("chunked")
 
         self.is_body_read = True
 

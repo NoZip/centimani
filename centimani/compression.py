@@ -4,7 +4,7 @@ from asyncio import coroutine
 
 SUPPORTED_COMPRESSIONS = frozenset(("deflate", "gzip"))
 
-class DecompressReaderPipe:
+class DecompressPipe:
     @staticmethod
     def _get_decoder(name):
         if name == "deflate":
@@ -26,8 +26,8 @@ class DecompressReaderPipe:
     def __anext__(self):
         try:
             chunk = yield from self._reader.__anext__()
-        except StopIteration:
-            raise StopIteration
+        except StopAsyncIteration:
+            raise StopAsyncIteration
 
         for decoder in self._decoder_chain:
             chunk = decoder.decompress(chunk)

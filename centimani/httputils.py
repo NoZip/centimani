@@ -8,6 +8,8 @@ from collections import defaultdict
 from collections.abc import *
 from asyncio import coroutine
 
+from asyncioplus.utils import *
+
 
 # HTTP/1.1 status reasons
 STATUS_REASON = {
@@ -194,10 +196,7 @@ class StreamBodyProducer:
 # Chunked transfert helper #
 #==========================#
 
-class StopAsyncIteration(Exception):
-    pass
-
-class ChunkedTransfertReader:
+class ChunkedTransfertIterator:
     """
     TODO: test this
     """
@@ -205,6 +204,7 @@ class ChunkedTransfertReader:
     def __init__(self, reader):
         self._reader = reader
 
+    @coroutine
     def __aiter__(self):
         return self
 
@@ -217,40 +217,6 @@ class ChunkedTransfertReader:
             raise StopAsyncIteration
 
         chunk = yield from self._reader.read(chunk_size)
-        return chunk
-
-
-class BodyReader:
-    def __init__(self, reader, body_size = None):
-        self._reader = reader
-        self._body_size = body_size
-        
-        if self._body_size:
-            self._chunk_count, self._last_chunk_size = divmod(self._body_size, DEFAULT_BUFFER_SIZE)
-
-        self._chunk_index = 0
-
-    @coroutine
-    def __aiter__(self):
-        return self
-
-    @coroutine
-    def __anext__(self):
-        if self._body_size and self._chunk_index > self._chunk_count:
-            raise StopAsyncIteration
-
-        chunk_size = DEFAULT_BUFFER_SIZE
-
-        if self._body_size and self._chunk_index == self._chunk_count:
-            chunk_size = self._last_chunk_size
-
-        chunk = yield from self._reader.read(chunk_size)
-
-        if chunk == b"":
-            raise StopAsyncIteration
-
-        self._chunk_index += 1
-
         return chunk
 
 
