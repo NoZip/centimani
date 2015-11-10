@@ -210,7 +210,7 @@ class Dispatcher:
         if request:
             yield from handler.cleanup()
 
-    def find_route(self, path):
+    def _find_route(self, path):
         for pattern, request_handler_factory in self._routes:
             match = pattern.match(path)
             if match:
@@ -219,154 +219,157 @@ class Dispatcher:
         raise RoutingError("Route not found")
 
     @coroutine
-    def handle_connection(self, reader, writer):
-        peername = writer.get_extra_info("peername")
+    def _handle_request(self, reader, writer, peername):
+        assert reader
+        assert writer
 
-        self.logger.debug("peer {0!r} connected".format(peername))
+        #-----------------#
+        # Receive request #
+        #-----------------#
 
-        # A break statement in this loop will close the connection.
-        while True:            
-            #-----------------#
-            # Receive request #
-            #-----------------#
+        try:
+            read_coroutine = reader.read_until(b"\r\n")
+            request_line = yield from asyncio.wait_for(read_coroutine, 90)
+        except asyncio.TimeoutError as error:
+            # After request timeout, send an error response then close the connection
+            self.logger.debug("{0[0]}:{0[1]} -> Timeout error".format(peername))
+            yield from self.send_error(reader, writer, 408)
+            return False
+        except ConnectionResetError as error:
+            self.logger.debug("{0[0]}:{0[1]} -> Connection reset error".format(peername))
+            return False
 
-            try:
-                read_coroutine = reader.read_until(b"\r\n")
-                request_line = yield from asyncio.wait_for(read_coroutine, 90)
-            except asyncio.TimeoutError as error:
-                # After request timeout, send an error response then close the connection
-                self.logger.debug("peer {0!r}: Timeout error".format(peername))
-                yield from self.send_error(reader, writer, 408)
-                break
-            except ConnectionResetError as error:
-                self.logger.debug("peer {0!r}: Connection reset error".format(peername))
-                break
+        request_line = request_line.decode("ascii").strip()
 
-            request_line = request_line.decode("ascii").strip()
+        if not request_line:
+            # No request line = EOF, so we close the connection
+            self.logger.debug("{0[0]}:{0[1]} -> No request line, at EOF".format(peername))
+            return False
 
-            if not request_line:
-                # No request line = EOF, so we close the connection
-                self.logger.debug("peer {0!r}: No request line, at EOF".format(peername))
-                break
+        self.logger.debug("{0[0]}:{0[1]} -> {1}".format(peername,request_line))
 
-            self.logger.debug("{0!r} -> {1}".format(peername,request_line))
+        match = REQUEST_REGEX.match(request_line)
+        
+        if match is None:
+            # Bad request, connection is closed after error is send
+            self.logger.debug("{0[0]}:{0[1]} -> Request line not matching".format(peername))
+            yield from self.send_error(reader, writer, 400)
+            return False
 
-            match = REQUEST_REGEX.match(request_line)
+        request_line = unquote_plus(request_line)
+
+        method, url, version = match.groups()
+
+        url = urlsplit(url)
+        path = url.path
+        query = parse_qs(url.query)
+
+        request = Request(method, path, query, version = version)
+
+        # parse headers
+        try:
+            lines = yield from reader.read_until(b"\r\n\r\n")
+            for line in lines.split(b"\r\n"):
+                line = line.decode("ascii").strip()
+                name, value = request.headers.parse_line(line)
+                request.headers.add(name, value)
+        except HeaderParseError as error:
+            # Bad request, connection is closed after error is send
+            self.logger.debug("{0[0]}:{0[1]} -> Headers parsing failed".format(peername))
+            yield from self.send_error(reader, writer, 400)
+            return False
+
+        #-------------------------------------#
+        # Body length and encoding validation #
+        #-------------------------------------#
+
+        transfert_encoding = request.headers.get("Transfert-Encoding", [])
+        content_length = request.headers.get("Content-Length", [])
+
+        if transfert_encoding:
+            if content_length:
+                del request.headers["Content-Length"]
             
-            if match is None:
-                # Bad request, connection is closed after error is send
-                self.logger.debug("peer {0!r}: Request line not matching".format(peername))
+            if transfert_encoding[-1] != "chunked":
+                self.logger.debug("{0[0]}:{0[1]} -> chunked is not final encoding".format(peername))
                 yield from self.send_error(reader, writer, 400)
-                break
-
-            request_line = unquote_plus(request_line)
-
-            method, url, version = match.groups()
-
-            url = urlsplit(url)
-            path = url.path
-            query = parse_qs(url.query)
-
-            request = Request(method, path, query, version = version)
-
-            # parse headers
-            try:
-                lines = yield from reader.read_until(b"\r\n\r\n")
-                for line in lines.split(b"\r\n"):
-                    line = line.decode("ascii").strip()
-                    name, value = request.headers.parse_line(line)
-                    request.headers.add(name, value)
-            except HeaderParseError as error:
-                # Bad request, connection is closed after error is send
-                self.logger.debug("peer {0!r}: Headers parsing failed".format(peername))
-                yield from self.send_error(reader, writer, 400)
-                break
-
-            #-------------------------------------#
-            # Body length and encoding validation #
-            #-------------------------------------#
-
-            transfert_encoding = request.headers.get("Transfert-Encoding", [])
-            content_length = request.headers.get("Content-Length", [])
-
-            if transfert_encoding:
-                if content_length:
-                    del request.headers["Content-Length"]
-                
-                if transfert_encoding[-1] != "chunked":
-                    self.logger.debug("peer {0!r}: chunked is not final encoding".format(peername))
-                    yield from self.send_error(reader, writer, 400)
-                    break
-                
+                return False
             
-            elif content_length:
-                if len(content_length) > 1:
-                    self.logger.debug("peer {0!r}: too many Content-Length values".format(peername))
-                    yield from self.send_error(reader, writer, 400)
-                    break
+        
+        elif content_length:
+            if len(content_length) > 1:
+                self.logger.debug("{0[0]}:{0[1]} -> too many Content-Length values".format(peername))
+                yield from self.send_error(reader, writer, 400)
+                return False
 
-                if not re.match(r"^[1-9][0-9]*$", content_length[0]):
-                    self.logger.debug("peer {0!r}: malformed Content-Length value".format(peername))
-                    yield from self.send_error(reader, writer, 400)
-                    break
+            if not re.match(r"^[1-9][0-9]*$", content_length[0]):
+                self.logger.debug("{0[0]}:{0[1]} -> malformed Content-Length value".format(peername))
+                yield from self.send_error(reader, writer, 400)
+                return False
 
-            else:
-                request.headers.set("Content-Length", 0)
+        else:
+            request.headers.set("Content-Length", 0)
 
-            #-----------------#
-            # Request routing #
-            #-----------------#
+        #-----------------#
+        # Request routing #
+        #-----------------#
 
-            try:
-                request_handler_factory, args, kwargs = self.find_route(path)
-            except RoutingError as error:
-                # No route finded, send 404 not find error
-                self.logger.debug("Route not find: {0}".format(path))
-                yield from self.send_error(reader, writer, 404, request = request)
-                continue
+        keep_alive = "close" not in request.headers.get("Connection", [])
 
-            if method.lower() not in request_handler_factory.methods:
-                # Method not implemented, send error 405 not implemented
-                self.logger.debug("Method {0} not implemented in {1}".format(
-                    method.lower(),
-                    request_handler_factory.__name__
-                ))
+        try:
+            request_handler_factory, args, kwargs = self._find_route(path)
+        except RoutingError as error:
+            # No route finded, send 404 not find error
+            self.logger.debug("{0[0]}:{0[1]} -> route not find: {1}".format(peername, path))
+            yield from self.send_error(reader, writer, 404, request = request)
+            return keep_alive
 
-                yield from self.send_error(
-                    reader, writer,
-                    405,
-                    headers = HTTPHeaders(allowed=request_handler_factory.methods),
-                    request = request
-                )
+        if method.lower() not in request_handler_factory.methods:
+            # Method not implemented, send error 405 not implemented
+            self.logger.debug("{0[0]}:{0[1]} -> method {1} not implemented in {0}".format(method.lower(), request_handler_factory.__name__ ))
 
-                continue
+            yield from self.send_error(
+                reader, writer,
+                405,
+                headers = HTTPHeaders(allowed=request_handler_factory.methods),
+                request = request
+            )
 
-            #-------------------------#
-            # Request handler calling #
-            #-------------------------#
+            return keep_alive
 
-            handler = request_handler_factory(self, reader, writer, request)
-            method_handler = getattr(handler, method.lower())
+        #-------------------------#
+        # Request handler calling #
+        #-------------------------#
 
-            try:
-                yield from self._loop.create_task(method_handler(*args, **kwargs))
-            except ConnectionError as error:
-                self.logger.debug("peer {0!r}: error {1!s}".format(peername, error))
-                break
-            except Exception as error:
-                self.logger.debug("peer {0!r}: error {1!s}".format(peername, error))
-                yield from self.send_error(reader, writer, 500, request = request)
-                continue
-                
-            if request.headers.get("Connection", None) == "close":
-                self.logger.debug("peer {0!r}: Connection close found".format(peername))
-                break
+        handler = request_handler_factory(self, reader, writer, request)
+        method_handler = getattr(handler, method.lower())
 
-            yield from handler.cleanup()
+        try:
+            yield from self._loop.create_task(method_handler(*args, **kwargs))
+        except ConnectionError as error:
+            self.logger.debug("{0[0]}:{0[1]} -> error {1!s}".format(peername, error))
+            return False
+        except Exception as error:
+            self.logger.debug("{0[0]}:{0[1]} -> error {1!s}".format(peername, error))
+            yield from self.send_error(reader, writer, 500, request = request)
+            return keep_alive
+
+        yield from handler.cleanup()
+
+        return keep_alive
+
+    @coroutine
+    def _handle_connection(self, reader, writer):
+        peername = peername = writer.get_extra_info("peername")
+        self.logger.debug("{0[0]}:{0[1]} -> connected".format(peername))
+
+        keep_alive = True
+        while keep_alive:
+            keep_alive = yield from self._handle_request(reader, writer, peername)
 
         # Closing connection
         writer.close()
-        self.logger.debug("peer {0!r} disconnected".format(peername))
+        self.logger.debug("{0[0]}:{0[1]} -> disconnected".format(peername))
 
     @coroutine
     def listen(self, host="localhost", port=8080):
@@ -375,7 +378,7 @@ class Dispatcher:
         """
 
         server = yield from start_server(
-            self.handle_connection,
+            self._handle_connection,
             host = host,
             port = port,
             loop = self._loop
