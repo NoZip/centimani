@@ -193,23 +193,19 @@ class ClientConnection:
         content_length = response.headers.get("Content-Length", [])
 
         if "chunked" not in transfert_encoding:
-            # no content_length: read until closing
-            # TODO
-            if not content_length:
-                self.close()
-                raise NotImplementedError
-
             # multiple Content-Length generate an error
-            elif len(content_length) > 1:
+            if len(content_length) > 1:
                 self.close()
                 raise Exception()
 
-            body_size = int(content_length[0])
+            # if Content-Length header is present, get body size from it
+            # else, read stream until EOF
+            body_size = int(content_length[0]) if content_length else None
             body_reader = BlockReaderIterator(self.reader, body_size)
 
             # non chunked transfert encoding
             if transfert_encoding:
-                body_reader = DecompressReaderPipe(body_reader, transfert_encoding)
+                body_reader = DecompressPipe(body_reader, transfert_encoding)
 
             running = True
             while running:
