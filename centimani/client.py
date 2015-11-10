@@ -200,24 +200,24 @@ class ClientConnection:
 
             # if Content-Length header is present, get body size from it
             # else, read stream until EOF
-            body_size = int(content_length[0]) if content_length else None
-            body_reader = BlockReaderIterator(self.reader, body_size)
+            body_size = None
+            if content_length:
+                body_size = int(content_length[0])
 
-            # non chunked transfert encoding
-            if transfert_encoding:
-                body_reader = DecompressPipe(body_reader, transfert_encoding)
+            if body_size != 0:
+                body_reader = BlockReaderIterator(self.reader, body_size)
 
-            running = True
-            while running:
-                try:
-                    chunk = yield from body_reader.__anext__()
-                except StopAsyncIteration:
-                    running = False
-                else:
-                    if body_chunk_callback is None:
-                        body.write(chunk)
+                running = True
+                while running:
+                    try:
+                        chunk = yield from body_reader.__anext__()
+                    except StopAsyncIteration:
+                        running = False
                     else:
-                        body_chunk_callback(chunk)
+                        if body_chunk_callback is None:
+                            body.write(chunk)
+                        else:
+                            body_chunk_callback(chunk)
 
         else:
             # chunked is not the final encoding: read until closing
