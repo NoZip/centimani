@@ -7,6 +7,7 @@ from datetime import datetime
 from urllib.parse import urlsplit, unquote_plus, parse_qs
 from asyncio import coroutine
 from asyncioplus.iostream import *
+from asyncioplus.iofile import *
 from asyncioplus.utils import *
 
 from .httputils import *
@@ -37,88 +38,21 @@ class BaseHandler:
     Base handler semantics.
     """
 
-    def __init__(self, dispatcher, reader, writer):
+    def __init__(self, dispatcher, reader, writer, request = None):
         self.dispatcher = dispatcher
         self.reader = reader
         self.writer = writer
+        self.request = request
 
         self.is_body_read = False
-
-
-    def write_header(self, response):
-        """
-        Send the HTTP header to the client.
-        """
-        assert isinstance(response, Response)
-        
-        status_line = "HTTP/{0} {1} {2}\r\n".format(
-            response.version,
-            response.status,
-            STATUS_REASON[response.status]
-        )
-
-        headers_addons = HTTPHeaders(
-            date = datetime.utcnow(),
-            server = self.dispatcher.server_agent
-        )
-
-        response.headers.update(headers_addons)
-        data = status_line + response.headers.http_encode() + "\r\n"
-        self.writer.write(data.encode("ascii"))
-
-        self.dispatcher.logger.debug(data)
-
-
-class ErrorHandler(BaseHandler):
-    """
-    Handle errors.
-
-    Can be subclassed to override the error method in order to change error
-    handling behavior.
-    """
 
     @coroutine
-    def error(self, status, headers = None, message = ""):
-        headers = headers or HTTPHeaders()
+    def cleanup(self):
+        assert self.request
 
-        message_bin = message.encode("utf-8")
-        
-        response = Response(status, headers)
-        response.headers.set("Content-Length", len(message_bin))
-
-        self.write_header(response)
-        self.writer.write(message_bin)
-
-
-HTTP11_METHODS = frozenset(("get", "head", "post", "options", "connect", "trace", "put", "patch", "delete"))
-
-class MetaRequestHandler(type):
-    """
-    Metaclass for all user-defined request handlers.
-
-    Populate the methods attribute of the request handler in order to easyly
-    acces to handler's allowed methods.
-    """
-    def __init__(cls, name, bases, namespace):
-        methods = set()
-
-        for method in HTTP11_METHODS:
-            method_handler = getattr(cls, method, None)
-            if method_handler and asyncio.iscoroutinefunction(method_handler):
-                methods.add(method)
-
-        cls.methods = frozenset(methods)
-
-
-class RequestHandler(BaseHandler, metaclass=MetaRequestHandler):
-    """
-    User defined request handler, must be subclassed.
-    """
-    def __init__(self, dispatcher, request, reader, writer):
-        super().__init__(dispatcher, reader, writer)
-
-        self.request = request
-        self.is_body_read = False
+        if not self.is_body_read:
+            file_writer = File.open(os.devnull, "wb")
+            yield from self.read_body(stream = file_writer)
 
     @coroutine
     def read_body(self, stream):
@@ -173,6 +107,73 @@ class RequestHandler(BaseHandler, metaclass=MetaRequestHandler):
 
         self.is_body_read = True
 
+    def write_header(self, response):
+        """
+        Send the HTTP header to the client.
+        """
+        assert isinstance(response, Response)
+        
+        status_line = "HTTP/{0} {1} {2}\r\n".format(
+            response.version,
+            response.status,
+            STATUS_REASON[response.status]
+        )
+
+        headers_addons = HTTPHeaders(
+            date = datetime.utcnow(),
+            server = self.dispatcher.server_agent
+        )
+
+        response.headers.update(headers_addons)
+        data = status_line + response.headers.http_encode() + "\r\n"
+        self.writer.write(data.encode("ascii"))
+
+        self.dispatcher.logger.debug(data)
+
+
+class ErrorHandler(BaseHandler):
+    """
+    Handle errors.
+
+    Can be subclassed to override the error method in order to change error
+    handling behavior.
+    """
+
+    @coroutine
+    def error(self, status, headers = None):
+        response = Response(status, headers)
+        response.headers.set("Content-Length", 0)
+
+        self.write_header(response)
+
+
+HTTP11_METHODS = frozenset(("get", "head", "post", "options", "connect", "trace", "put", "patch", "delete"))
+
+class MetaRequestHandler(type):
+    """
+    Metaclass for all user-defined request handlers.
+
+    Populate the methods attribute of the request handler in order to easyly
+    acces to handler's allowed methods.
+    """
+    def __init__(cls, name, bases, namespace):
+        methods = set()
+
+        for method in HTTP11_METHODS:
+            method_handler = getattr(cls, method, None)
+            if method_handler and asyncio.iscoroutinefunction(method_handler):
+                methods.add(method)
+
+        cls.methods = frozenset(methods)
+
+
+class RequestHandler(BaseHandler, metaclass=MetaRequestHandler):
+    """
+    User defined request handler, must be subclassed.
+    """
+    def __init__(self, dispatcher, reader, writer, request):
+        super().__init__(dispatcher, reader, writer, request)
+
 
 #=============================#
 # Web server route dispatcher #
@@ -201,6 +202,14 @@ class Dispatcher:
         self.server_agent = server_agent
         self.logger = logger or logging.getLogger("centimani.server")
 
+    @coroutine
+    def send_error(self, reader, writer, status, headers = None, request = None, **kwargs):
+        handler = self._error_handler_factory(self, reader, writer, request)
+        yield from self._loop.create_task(handler.error(status, headers, **kwargs))
+
+        if request:
+            yield from handler.cleanup()
+
     def find_route(self, path):
         for pattern, request_handler_factory in self._routes:
             match = pattern.match(path)
@@ -211,20 +220,12 @@ class Dispatcher:
 
     @coroutine
     def handle_connection(self, reader, writer):
-        handler = None
-        
         peername = writer.get_extra_info("peername")
 
         self.logger.debug("peer {0!r} connected".format(peername))
 
         # A break statement in this loop will close the connection.
-        while True:
-
-            if isinstance(handler, RequestHandler) and not handler.is_body_read:
-                # read previous request's body if not read
-                with open(os.devnull, "wb") as devnull:
-                    yield from handler.read_body(devnull)
-            
+        while True:            
             #-----------------#
             # Receive request #
             #-----------------#
@@ -235,8 +236,7 @@ class Dispatcher:
             except asyncio.TimeoutError as error:
                 # After request timeout, send an error response then close the connection
                 self.logger.debug("peer {0!r}: Timeout error".format(peername))
-                handler = self._error_handler_factory(self, reader, writer)
-                yield from self._loop.create_task(handler.error(408))
+                yield from self.send_error(reader, writer, 408)
                 break
             except ConnectionResetError as error:
                 self.logger.debug("peer {0!r}: Connection reset error".format(peername))
@@ -256,8 +256,7 @@ class Dispatcher:
             if match is None:
                 # Bad request, connection is closed after error is send
                 self.logger.debug("peer {0!r}: Request line not matching".format(peername))
-                handler = self._error_handler_factory(self, reader, writer)
-                yield from self._loop.create_task(handler.error(400))
+                yield from self.send_error(reader, writer, 400)
                 break
 
             request_line = unquote_plus(request_line)
@@ -280,8 +279,7 @@ class Dispatcher:
             except HeaderParseError as error:
                 # Bad request, connection is closed after error is send
                 self.logger.debug("peer {0!r}: Headers parsing failed".format(peername))
-                handler = self._error_handler_factory(self, reader, writer)
-                yield from self._loop.create_task(handler.error(400))
+                yield from self.send_error(reader, writer, 400)
                 break
 
             #-------------------------------------#
@@ -297,22 +295,19 @@ class Dispatcher:
                 
                 if transfert_encoding[-1] != "chunked":
                     self.logger.debug("peer {0!r}: chunked is not final encoding".format(peername))
-                    handler = self._error_handler_factory(self, reader, writer)
-                    yield from self._loop.create_task(handler.error(400))
+                    yield from self.send_error(reader, writer, 400)
                     break
                 
             
             elif content_length:
                 if len(content_length) > 1:
                     self.logger.debug("peer {0!r}: too many Content-Length values".format(peername))
-                    handler = self._error_handler_factory(self, reader, writer)
-                    yield from self._loop.create_task(handler.error(400))
+                    yield from self.send_error(reader, writer, 400)
                     break
 
                 if not re.match(r"^[1-9][0-9]*$", content_length[0]):
                     self.logger.debug("peer {0!r}: malformed Content-Length value".format(peername))
-                    handler = self._error_handler_factory(self, reader, writer)
-                    yield from self._loop.create_task(handler.error(400))
+                    yield from self.send_error(reader, writer, 400)
                     break
 
             else:
@@ -327,8 +322,7 @@ class Dispatcher:
             except RoutingError as error:
                 # No route finded, send 404 not find error
                 self.logger.debug("Route not find: {0}".format(path))
-                handler = self._error_handler_factory(self, reader, writer)
-                yield from self._loop.create_task(handler.error(404))
+                yield from self.send_error(reader, writer, 404, request = request)
                 continue
 
             if method.lower() not in request_handler_factory.methods:
@@ -337,16 +331,21 @@ class Dispatcher:
                     method.lower(),
                     request_handler_factory.__name__
                 ))
-                response_headers = HTTPHeaders(allowed=request_handler_factory.methods)
-                handler = self._error_handler_factory(self, reader, writer)
-                yield from self._loop.create_task(handler.error(405, response_headers))
+
+                yield from self.send_error(
+                    reader, writer,
+                    405,
+                    headers = HTTPHeaders(allowed=request_handler_factory.methods),
+                    request = request
+                )
+
                 continue
 
             #-------------------------#
             # Request handler calling #
             #-------------------------#
 
-            handler = request_handler_factory(self, request, reader, writer)
+            handler = request_handler_factory(self, reader, writer, request)
             method_handler = getattr(handler, method.lower())
 
             try:
@@ -355,14 +354,15 @@ class Dispatcher:
                 self.logger.debug("peer {0!r}: error {1!s}".format(peername, error))
                 break
             except Exception as error:
-                handler = self._error_handler_factory(self, reader, writer)
-                yield from self._loop.create_task(handler.error(500))
                 self.logger.debug("peer {0!r}: error {1!s}".format(peername, error))
-                # raise error
+                yield from self.send_error(reader, writer, 500, request = request)
+                continue
                 
-            if "Connection" in request.headers and request.headers.get("Connection") == "close":
+            if request.headers.get("Connection", None) == "close":
                 self.logger.debug("peer {0!r}: Connection close found".format(peername))
                 break
+
+            yield from handler.cleanup()
 
         # Closing connection
         writer.close()
