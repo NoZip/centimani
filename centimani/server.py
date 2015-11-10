@@ -37,56 +37,12 @@ class BaseHandler:
     Base handler semantics.
     """
 
-    def __init__(self, dispatcher, request, reader, writer):
+    def __init__(self, dispatcher, reader, writer):
         self.dispatcher = dispatcher
-        self.request = request
         self.reader = reader
         self.writer = writer
 
         self.is_body_read = False
-
-    @coroutine
-    def read_body(self, stream):
-        assert(not self.is_body_read)
-
-        if not self.request.headers.is_chunked:
-            # no Content-Length headers = no request body
-            if "Content-Length" in self.request.headers:
-                body_size = int(self.request.headers.get_one("Content-Length"))
-
-                if body_size > 0:
-                    body_reader = BlockReaderIterator(self.reader, body_size)
-
-                    running = True
-                    while running:
-                        try:
-                            chunk = yield from body_reader.__anext__()
-                        except StopAsyncIteration:
-                            running = False
-                        else:
-                            stream.write(chunk)
-
-        else:
-            body_size = 0
-
-            chuned_reader = ChunkedTransfertIterator(self.reader)
-
-            running = True
-            while running:
-                try:
-                    chunk = yield from chuned_reader.__anext__()
-                except StopAsyncIteration:
-                    running = False
-                else:
-                    stream.write(chunk)
-
-                stream.write(chunk)
-                body_size += len(chunk)
-
-            self.request.headers.set("Content-Length", body_size)
-            self.request.headers["Transfert-Encoding"].remove("chunked")
-
-        self.is_body_read = True
 
 
     def write_header(self, response):
@@ -121,15 +77,14 @@ class ErrorHandler(BaseHandler):
     handling behavior.
     """
 
-    def __init__(self, dispatcher, request, reader, writer):
-        super().__init__(dispatcher, request, reader, writer)
-
     @coroutine
-    def error(self, status, headers=HTTPHeaders(), message=""):
+    def error(self, status, headers = None, message = ""):
+        headers = headers or HTTPHeaders()
+
         message_bin = message.encode("utf-8")
         
-        response = Response(status=status, headers=headers)
-        response.headers.add("Content-Length", len(message_bin))
+        response = Response(status, headers)
+        response.headers.set("Content-Length", len(message_bin))
 
         self.write_header(response)
         self.writer.write(message_bin)
@@ -159,7 +114,64 @@ class RequestHandler(BaseHandler, metaclass=MetaRequestHandler):
     """
     User defined request handler, must be subclassed.
     """
-    pass
+    def __init__(self, dispatcher, request, reader, writer):
+        super().__init__(dispatcher, reader, writer)
+
+        self.request = request
+        self.is_body_read = False
+
+    @coroutine
+    def read_body(self, stream):
+        assert not self.is_body_read
+
+        transfert_encoding = self.request.headers.get("Transfert-Encoding", [])
+        content_length = self.request.headers.get("Content-Length", [])
+
+        assert "chunked" in transfert_encoding or content_length
+
+        if content_length:
+            assert(len(content_length) == 1)
+
+            body_size = int(content_length[0])
+
+            if body_size > 0:
+                body_reader = BlockReaderIterator(self.reader, body_size)
+
+                running = True
+                while running:
+                    try:
+                        block = yield from body_reader.__anext__()
+                    except StopAsyncIteration:
+                        running = False
+                    else:
+                        stream.write(block)
+
+        elif "chunked" in transfert_encoding:
+            assert transfert_encoding[-1] == "chunked"
+
+            body_size = 0
+
+            chunked_reader = ChunkedTransfertIterator(self.reader)
+
+            if transfert_encoding[:-1]:
+                raise NotImplementedError("no support for chunked body decompression")
+
+            running = True
+            while running:
+                try:
+                    chunk = yield from chunked_reader.__anext__()
+                except StopAsyncIteration:
+                    running = False
+                else:
+                    stream.write(chunk)
+
+                stream.write(chunk)
+                body_size += len(chunk)
+
+            self.request.headers.set("Content-Length", body_size)
+            self.request.headers["Transfert-Encoding"].remove("chunked")
+
+        self.is_body_read = True
 
 
 #=============================#
@@ -205,8 +217,10 @@ class Dispatcher:
 
         self.logger.debug("peer {0!r} connected".format(peername))
 
+        # A break statement in this loop will close the connection.
         while True:
-            if handler and handler.request and not handler.is_body_read:
+
+            if isinstance(handler, RequestHandler) and not handler.is_body_read:
                 # read previous request's body if not read
                 with open(os.devnull, "wb") as devnull:
                     yield from handler.read_body(devnull)
@@ -221,7 +235,7 @@ class Dispatcher:
             except asyncio.TimeoutError as error:
                 # After request timeout, send an error response then close the connection
                 self.logger.debug("peer {0!r}: Timeout error".format(peername))
-                handler = self._error_handler_factory(self, None, reader, writer)
+                handler = self._error_handler_factory(self, reader, writer)
                 yield from self._loop.create_task(handler.error(408))
                 break
             except ConnectionResetError as error:
@@ -242,7 +256,7 @@ class Dispatcher:
             if match is None:
                 # Bad request, connection is closed after error is send
                 self.logger.debug("peer {0!r}: Request line not matching".format(peername))
-                handler = self._error_handler_factory(self, None, reader, writer)
+                handler = self._error_handler_factory(self, reader, writer)
                 yield from self._loop.create_task(handler.error(400))
                 break
 
@@ -266,19 +280,43 @@ class Dispatcher:
             except HeaderParseError as error:
                 # Bad request, connection is closed after error is send
                 self.logger.debug("peer {0!r}: Headers parsing failed".format(peername))
-                handler = self._error_handler_factory(self, None, reader, writer)
+                handler = self._error_handler_factory(self, reader, writer)
                 yield from self._loop.create_task(handler.error(400))
                 break
 
-            if "Content-Length" in request.headers:
-                if "Transfert-Encoding" in request.headers:
+            #-------------------------------------#
+            # Body length and encoding validation #
+            #-------------------------------------#
+
+            transfert_encoding = request.headers.get("Transfert-Encoding", [])
+            content_length = request.headers.get("Content-Length", [])
+
+            if transfert_encoding:
+                if content_length:
                     del request.headers["Content-Length"]
-                elif len(request.headers["Content-Length"]) > 1:
-                    # Multiple Content-Length headers, error 400 is send
-                    self.logger.debug("peer {0!r}: multiple Content-Length headers".format(peername))
-                    handler = self._error_handler_factory(self, request, reader, writer)
+                
+                if transfert_encoding[-1] != "chunked":
+                    self.logger.debug("peer {0!r}: chunked is not final encoding".format(peername))
+                    handler = self._error_handler_factory(self, reader, writer)
                     yield from self._loop.create_task(handler.error(400))
                     break
+                
+            
+            elif content_length:
+                if len(content_length) > 1:
+                    self.logger.debug("peer {0!r}: too many Content-Length values".format(peername))
+                    handler = self._error_handler_factory(self, reader, writer)
+                    yield from self._loop.create_task(handler.error(400))
+                    break
+
+                if not re.match(r"^[1-9][0-9]*$", content_length[0]):
+                    self.logger.debug("peer {0!r}: malformed Content-Length value".format(peername))
+                    handler = self._error_handler_factory(self, reader, writer)
+                    yield from self._loop.create_task(handler.error(400))
+                    break
+
+            else:
+                request.headers.set("Content-Length", 0)
 
             #-----------------#
             # Request routing #
@@ -289,7 +327,7 @@ class Dispatcher:
             except RoutingError as error:
                 # No route finded, send 404 not find error
                 self.logger.debug("Route not find: {0}".format(path))
-                handler = self._error_handler_factory(self, request, reader, writer)
+                handler = self._error_handler_factory(self, reader, writer)
                 yield from self._loop.create_task(handler.error(404))
                 continue
 
@@ -300,7 +338,7 @@ class Dispatcher:
                     request_handler_factory.__name__
                 ))
                 response_headers = HTTPHeaders(allowed=request_handler_factory.methods)
-                handler = self._error_handler_factory(self, request, reader, writer)
+                handler = self._error_handler_factory(self, reader, writer)
                 yield from self._loop.create_task(handler.error(405, response_headers))
                 continue
 
@@ -313,10 +351,14 @@ class Dispatcher:
 
             try:
                 yield from self._loop.create_task(method_handler(*args, **kwargs))
+            except ConnectionError as error:
+                self.logger.debug("peer {0!r}: error {1!s}".format(peername, error))
+                break
             except Exception as error:
-                handler = self._error_handler_factory(self, request, reader, writer)
+                handler = self._error_handler_factory(self, reader, writer)
                 yield from self._loop.create_task(handler.error(500))
-                raise error
+                self.logger.debug("peer {0!r}: error {1!s}".format(peername, error))
+                # raise error
                 
             if "Connection" in request.headers and request.headers.get("Connection") == "close":
                 self.logger.debug("peer {0!r}: Connection close found".format(peername))
