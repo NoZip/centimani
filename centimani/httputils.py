@@ -236,20 +236,20 @@ class HTTPHeaders(defaultdict):
     Used to handle HTTP headers.
 
     >>> HTTPHeaders(content_length=23, transfert_encoding=["chunked", "gzip"])
-    {'Transfert-Encoding': ['chunked', 'gzip'], 'Content-Length': ['23']}
+    {'transfert-encoding': ['chunked', 'gzip'], 'content-length': ['23']}
     """
 
     def __init__(self, **kwargs):
         """
         Initialize headers with named parameters.
 
-        Named parameters will be converted from "thing_header" to "Thing-Header"
+        Named parameters will be converted from "thing_header" to "thing-header"
         in order to normalize headers names.
         """
         super().__init__(list)
 
         for name, value in kwargs.items():
-            normalized_name = "-".join(w.capitalize() for w in name.split("_"))
+            normalized_name = "-".join(name.split("_")).lower()
             self.add(normalized_name, value)
 
     def __repr__(self):
@@ -257,8 +257,8 @@ class HTTPHeaders(defaultdict):
 
     @property
     def is_chunked(self):
-        if "Transfert-Encoding" in self:
-            return "chunked" in self.__getitem__["Transfert-Encoding"]
+        if "transfert-encoding" in self:
+            return "chunked" in self.__getitem__["transfert-encoding"]
 
         return False
 
@@ -319,7 +319,7 @@ class HTTPHeaders(defaultdict):
         if not RFC1123_REGEX.match(value) and "," in value:
             value = [v.strip() for v in value.split(",")]
 
-        return (name, value)
+        return (name.lower(), value)
 
     def http_encode(self):
         """
@@ -328,7 +328,7 @@ class HTTPHeaders(defaultdict):
 
         string = ""
         for name, values in self.items():
-            if name == "Set-Cookie":
+            if name == "set-cookie":
                 # Set-Cookie special case
                 for value in values:
                     string += name + ": " + value + "\r\n"

@@ -58,8 +58,8 @@ class BaseHandler:
     def read_body(self, stream):
         assert not self.is_body_read
 
-        transfert_encoding = self.request.headers.get("Transfert-Encoding", [])
-        content_length = self.request.headers.get("Content-Length", [])
+        transfert_encoding = self.request.headers.get("transfert-encoding", [])
+        content_length = self.request.headers.get("content-length", [])
 
         assert "chunked" in transfert_encoding or content_length
 
@@ -102,8 +102,8 @@ class BaseHandler:
                 stream.write(chunk)
                 body_size += len(chunk)
 
-            self.request.headers.set("Content-Length", body_size)
-            self.request.headers["Transfert-Encoding"].remove("chunked")
+            self.request.headers.set("content-length", body_size)
+            self.request.headers["transfert-encoding"].remove("chunked")
 
         self.is_body_read = True
 
@@ -142,7 +142,7 @@ class ErrorHandler(BaseHandler):
     @coroutine
     def error(self, status, headers = None):
         response = Response(status, headers)
-        response.headers.set("Content-Length", 0)
+        response.headers.set("content-length", 0)
 
         self.write_header(response)
 
@@ -283,12 +283,12 @@ class Dispatcher:
         # Body length and encoding validation #
         #-------------------------------------#
 
-        transfert_encoding = request.headers.get("Transfert-Encoding", [])
-        content_length = request.headers.get("Content-Length", [])
+        transfert_encoding = request.headers.get("transfert-encoding", [])
+        content_length = request.headers.get("content-length", [])
 
         if transfert_encoding:
             if content_length:
-                del request.headers["Content-Length"]
+                del request.headers["content-length"]
             
             if transfert_encoding[-1] != "chunked":
                 self.logger.debug("{0[0]}:{0[1]} -> chunked is not final encoding".format(peername))
@@ -298,17 +298,17 @@ class Dispatcher:
         
         elif content_length:
             if len(content_length) > 1:
-                self.logger.debug("{0[0]}:{0[1]} -> too many Content-Length values".format(peername))
+                self.logger.debug("{0[0]}:{0[1]} -> too many content-length values".format(peername))
                 yield from self.send_error(reader, writer, 400)
                 return False
 
             if not re.match(r"^[1-9][0-9]*$", content_length[0]):
-                self.logger.debug("{0[0]}:{0[1]} -> malformed Content-Length value".format(peername))
+                self.logger.debug("{0[0]}:{0[1]} -> malformed content-length value".format(peername))
                 yield from self.send_error(reader, writer, 400)
                 return False
 
         else:
-            request.headers.set("Content-Length", 0)
+            request.headers.set("content-length", 0)
 
         #-----------------#
         # Request routing #
