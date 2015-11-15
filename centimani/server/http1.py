@@ -13,7 +13,10 @@ import centimani.log
 from centimani.headers import Headers, HeaderParseError
 from centimani.server.dispatcher import RoutingError
 from centimani.server.handlers import AbstractConnectionHandler, AbstractResponseHandler, Request
-from centimani.utils import HTTP_STATUSES, HTTP_METHODS
+from centimani.utils import HTTP_STATUSES, HTTP_METHODS, BufferedBodyReader, ChunkedBodyReader
+
+if "StopAsyncIteration" not in dir(__builtins__):
+    from asyncioplus.utils import StopAsyncIteration
 
 logger = logging.getLogger(__name__)
 
@@ -62,34 +65,33 @@ class ConnectionHandler(AbstractConnectionHandler):
             body_size = int(content_length[0])
 
             if body_size > 0:
-                body = yield from self.reader.read(body_size)
-                stream.write(body)
+                body_reader = BufferedBodyReader(self.reader, body_size)
+
+                running = True
+                while running:
+                    try:
+                        block = yield from body_reader.__anext__()
+                    except StopAsyncIteration:
+                        running = False
+                    else:
+                        stream.write(block)
 
         elif "chunked" in transfert_encoding:
-            raise NotImplementedError
-            # assert transfert_encoding[-1] == "chunked"
+            assert transfert_encoding[-1] == "chunked"
+            
+            body_reader = ChunkedBodyReader(self.reader)
 
-            # body_size = 0
+            if transfert_encoding[:-1]:
+                raise NotImplementedError
 
-            # chunked_reader = ChunkedTransfertIterator(self.reader)
-
-            # if transfert_encoding[:-1]:
-            #     raise NotImplementedError("no support for chunked body decompression")
-
-            # running = True
-            # while running:
-            #     try:
-            #         chunk = yield from chunked_reader.__anext__()
-            #     except StopAsyncIteration:
-            #         running = False
-            #     else:
-            #         stream.write(chunk)
-
-            #     stream.write(chunk)
-            #     body_size += len(chunk)
-
-            # headers.set("content-length", body_size)
-            # del headers["transfert-encoding"]
+            running = True
+            while running:
+                try:
+                    chunk = yield from body_reader.__anext__()
+                except StopAsyncIteration:
+                    running = False
+                else:
+                    stream.write(chunk)
 
         handler.is_body_read = True
 

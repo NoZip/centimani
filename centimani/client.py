@@ -10,7 +10,10 @@ from urllib.parse import *
 
 from .compression import *
 from .headers import Headers
+from centimani.utils import HTTP_STATUSES, HTTP_METHODS, BufferedBodyReader, ChunkedBodyReader
 
+if "StopAsyncIteration" not in dir(__builtins__):
+    from asyncioplus.utils import StopAsyncIteration
 
 #=================#
 # HTTP structures #
@@ -77,6 +80,7 @@ class ClientConnection:
         self.writer.close()
         self.is_closed = True
 
+    @coroutine
     def fetch(self,
         url,
         method = "GET",
@@ -182,10 +186,10 @@ class ClientConnection:
         if not self._has_body(method, status):
             return (response, None)
 
-        transfert_encoding = response.headers.get("transfert-encoding", [])
+        transfert_encoding = response.headers.get("transfer-encoding", [])
         content_length = response.headers.get("content-length", [])
 
-        if "chunked" not in transfert_encoding:
+        if not transfert_encoding:
             # multiple content-length generate an error
             if len(content_length) > 1:
                 self.close()
@@ -198,44 +202,44 @@ class ClientConnection:
                 body_size = int(content_length[0])
 
             if body_size != 0:
-                if body_size:
-                    data = yield from self.reader.read(body_size)
-                else:
-                    raise NotImplementedError
+                body_reader = BufferedBodyReader(self.reader, body_size)
 
-                if not body_chunk_callback:
-                    body.write(data)
-                else:
-                    body_chunk_callback(data)
+                running = True
+                while running:
+                    try:
+                        block = yield from body_reader.__anext__()
+                    except StopAsyncIteration:
+                        running = False
+                    else:
+                        print("data block received")
+                        if not body_chunk_callback:
+                            body.write(block)
+                        else:
+                            body_chunk_callback(block)
+
         else:
-            raise NotImplementedError
             # chunked is not the final encoding: read until closing
             # TODO
-            # if transfert_encoding[-1] != "chunked":
-            #     self.close()
-            #     raise NotImplementedError
+            if transfert_encoding[-1] != "chunked":
+                self.close()
+                raise NotImplementedError
 
-            # if "content-length" in response.headers:
-            #     del response.headers["content-length"]
+            if "content-length" in response.headers:
+                del response.headers["content-length"]
 
-            # encoding_chain = transfert_encoding[:-1]
-            # chunks_reader = ChunkTransfertIterator(self.reader)
+            body_reader = ChunkedBodyReader(self.reader)
 
-            # if encoding_chain:
-            #     chunks_reader = DecompressPipe(chunks_reader, encoding_chain)
-
-            # running = True
-            # while running:
-            #     try:
-            #         chunk = yield from chunks_reader.__anext__()
-            #     except StopAsyncIteration:
-            #         running = False
-            #     else:
-            #         if body_chunk_callback is None:
-            #             body.write(chunk)
-            #         else:
-            #             body_chunk_callback(chunk)
-
+            running = True
+            while running:
+                try:
+                    chunk = yield from body_reader.__anext__()
+                except StopAsyncIteration:
+                    running = False
+                else:
+                    if not body_chunk_callback:
+                        body.write(chunk)
+                    else:
+                        body_chunk_callback(chunk)
 
         if "close" in response.headers.get("connection", []):
             self.close()
