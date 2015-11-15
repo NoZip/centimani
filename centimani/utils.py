@@ -1,6 +1,11 @@
+import io
 import re
 
+from asyncio import coroutine
 from datetime import datetime
+
+if "StopAsyncIteration" not in dir(__builtins__):
+    from asyncioplus.utils import StopAsyncIteration
 
 
 # HTTP statuses
@@ -122,3 +127,85 @@ def rfc1123_datetime_decode(string):
         minute = int(groups[4]),
         second = int(groups[5])
     )
+
+
+class BufferedBodyReader:
+    def __init__(self, reader, body_size = None, block_size = io.DEFAULT_BUFFER_SIZE):
+        self.reader = reader
+        self.body_size = body_size
+        self.block_size = block_size
+
+        self.current_block = 0
+
+        if self.body_size is not None:
+            self.block_count, self.last_block_size = divmod(self.body_size, self.block_size)
+
+        self.bytes_read = 0
+
+    @property
+    def is_complete(self):
+        return self.bytes_read == self.body_size
+
+    @coroutine
+    def __aiter__(self):
+        return self
+
+    @coroutine
+    def __anext__(self):
+        if self.body_size is not None:
+            if self.current_block < self.block_count:
+                block_size = self.block_size
+            elif self.current_block == self.block_count:
+                block_size = self.last_block_size
+            elif self.current_block > self.block_count:
+                block_size = 0
+        else:
+            block_size = self.block_size
+
+        if block_size == 0:
+            raise StopAsyncIteration
+
+        block = yield from self.reader.read(block_size)
+
+        if block == b"":
+            raise StopAsyncIteration
+
+        self.bytes_read += len(block)
+        self.current_block += 1
+
+        return block
+
+
+class ChunkedBodyReader:
+    def __init__(self, reader):
+        self.reader = reader
+
+        self.current_chunk = 0
+        # self.body_size = 0
+
+    @coroutine
+    def __aiter__(self):
+        return self
+
+    @coroutine
+    def __anext__(self):
+        chunk_header = yield from self.reader.read_until(b"\r\n")
+        chunk_size = int(chunk_header, base = 16)
+
+        if chunk_size == 0:
+            raise StopAsyncIteration
+
+        chunk = yield from self.reader.read(chunk_size + 2)
+        chunk, check_crlf = chunk[:-2], chunk[-2:]
+
+        if check_crlf != b"\r\n":
+            raise Exception("chunk not followed by CRLF")
+
+        if chunk == b"":
+            # TODO: parse trailer headers
+            raise StopAsyncIteration
+
+        # self.body_size += len(chunk)
+        self.current_chunk += 1
+
+        return chunk
