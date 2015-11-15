@@ -1,14 +1,15 @@
-import os
 import asyncio
+import os
+import re
 
-from urllib.parse import *
-from io import BytesIO
-from socket import socket
 from asyncio import coroutine
 from asyncioplus.iostream import *
+from io import BytesIO
+from socket import socket
+from urllib.parse import *
 
-from .httputils import *
 from .compression import *
+from .headers import Headers
 
 
 #=================#
@@ -16,26 +17,24 @@ from .compression import *
 #=================#
 
 class Request:
-    def __init__(self, url, method = "GET", headers = None, version = "1.1"):
+    def __init__(self, url, method = "GET", headers = None):
         self.uel = url
-        self.headers = headers or HTTPHeaders()
+        self.headers = headers or Headers()
         self.method = method
-        self.version = version
 
 class Response:
-    def __init__(self, request, status, headers = None, version = "1.1"):
+    def __init__(self, request, status, headers = None):
         self.request = request
         self.status = status
-        self.headers = headers or HTTPHeaders()
-        self.version = version
+        self.headers = headers or Headers()
 
 
 #===================#
 # Async HTTP client #
 #===================#
 
-STATUS_LINE_PATTERN = r"HTTP/(\d+\.\d+) (\d{3}) (.+)"
-STATUS_LINE_REGEX = re.compile(STATUS_LINE_PATTERN)
+_status_line = rb"^HTTP/(\d+\.\d+) (\d{3}) (.+)$"
+STATUS_LINE_REGEX = re.compile(_status_line)
 
 class ClientConnection:
     def __init__(self, user_agent = "Centimani/0.1", loop = None):
@@ -115,7 +114,7 @@ class ClientConnection:
 
         request.headers.set("host", self.host + ":" + str(self.port))
         request.headers.set("user-Agent", self.user_agent)
-        request.headers.add("accept-encoding", SUPPORTED_COMPRESSIONS)
+        # request.headers.add("accept-encoding", SUPPORTED_COMPRESSIONS)
 
         if "connection" not in request.headers:
             request.headers.set("connection", "keep-alive")
@@ -128,12 +127,12 @@ class ClientConnection:
             elif body_producer.has_size:
                 request.headers.set("content-length", body_producer.size)
             elif (
-                "transfert-nncoding" not in request.headers
+                "transfert-encoding" not in request.headers
                 or "chunked" not in request.headers["transfert-encoding"]
             ):
                 request.headers.set("transfert-encoding", "chunked")
 
-        header = "{} {} HTTP/{}\r\n".format(method, url, request.version)
+        header = "{0} {1} HTTP/{2}\r\n".format(method, url, "1.1")
         header += request.headers.http_encode()
         header += "\r\n"
 
@@ -151,33 +150,27 @@ class ClientConnection:
         #------------------#
 
         header = yield from self.reader.read_until(b"\r\n\r\n")
-        status_line, *header_lines = header.split(b"\r\n")
+        status_line, *headers_lines = header.split(b"\r\n")
 
         if not status_line:
+            # at EOF
             self.close()
-            raise Exception()
 
-        match = STATUS_LINE_REGEX.match(status_line.decode("ascii"))
+        match = STATUS_LINE_REGEX.match(status_line)
 
         if not match:
             self.close()
-            raise Exception()
+            raise Exception("malformed status line")
 
-        version, status, reason = match.groups()
-        major_version, minor_version = map(int, version.split(".", maxsplit = 1))
+        version, status, reason = map(lambda s: s.decode("ascii"), match.groups(b""))
         status = int(status, base = 10)
 
-        if major_version != 1:
+        if not "1.0" <= version <= "1.1":
             self.close()
-            raise Exception()
+            raise Exception("wrong http version")
 
-        response = Response(request, status, version = version)
-
-        response.headers = HTTPHeaders()
-        for line in header_lines:
-            line = line.decode("ascii")
-            name, value = response.headers.parse_line(line)
-            response.headers.add(name, value)
+        response = Response(request, status)
+        response.headers.parse_lines(headers_lines)
 
         #-------------------#
         # Get response body #
@@ -205,47 +198,43 @@ class ClientConnection:
                 body_size = int(content_length[0])
 
             if body_size != 0:
-                body_reader = BlockReaderIterator(self.reader, body_size)
+                if body_size:
+                    data = yield from self.reader.read(body_size)
+                else:
+                    raise NotImplementedError
 
-                running = True
-                while running:
-                    try:
-                        chunk = yield from body_reader.__anext__()
-                    except StopAsyncIteration:
-                        running = False
-                    else:
-                        if body_chunk_callback is None:
-                            body.write(chunk)
-                        else:
-                            body_chunk_callback(chunk)
-
+                if not body_chunk_callback:
+                    body.write(data)
+                else:
+                    body_chunk_callback(data)
         else:
+            raise NotImplementedError
             # chunked is not the final encoding: read until closing
             # TODO
-            if transfert_encoding[-1] != "chunked":
-                self.close()
-                raise NotImplementedError
+            # if transfert_encoding[-1] != "chunked":
+            #     self.close()
+            #     raise NotImplementedError
 
-            if "content-length" in response.headers:
-                del response.headers["content-length"]
+            # if "content-length" in response.headers:
+            #     del response.headers["content-length"]
 
-            encoding_chain = transfert_encoding[:-1]
-            chunks_reader = ChunkTransfertIterator(self.reader)
+            # encoding_chain = transfert_encoding[:-1]
+            # chunks_reader = ChunkTransfertIterator(self.reader)
 
-            if encoding_chain:
-                chunks_reader = DecompressPipe(chunks_reader, encoding_chain)
+            # if encoding_chain:
+            #     chunks_reader = DecompressPipe(chunks_reader, encoding_chain)
 
-            running = True
-            while running:
-                try:
-                    chunk = yield from chunks_reader.__anext__()
-                except StopAsyncIteration:
-                    running = False
-                else:
-                    if body_chunk_callback is None:
-                        body.write(chunk)
-                    else:
-                        body_chunk_callback(chunk)
+            # running = True
+            # while running:
+            #     try:
+            #         chunk = yield from chunks_reader.__anext__()
+            #     except StopAsyncIteration:
+            #         running = False
+            #     else:
+            #         if body_chunk_callback is None:
+            #             body.write(chunk)
+            #         else:
+            #             body_chunk_callback(chunk)
 
 
         if "close" in response.headers.get("connection", []):
