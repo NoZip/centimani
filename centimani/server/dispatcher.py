@@ -1,6 +1,7 @@
 import asyncio
 import asyncioplus.iostream
 import logging
+import re
 
 from asyncio import coroutine
 from ssl import SSLContext, PROTOCOL_SSLv23
@@ -15,6 +16,7 @@ from centimani.server.handlers import ErrorResponseHandler
 
 
 logger = logging.getLogger(__name__)
+
 
 DEFAULT_PROTOCOL_MAP = {
     "http/1.1" : http1.ConnectionHandler,
@@ -31,15 +33,19 @@ class Dispatcher:
         loop = None
     ):
         self._loop = loop or asyncio.get_event_loop()
-        self._routes = routes
+        self._routes = []
         self._error_handler_factory = error_handler_factory
         self._protocol_map = protocols_map
+
+        for pattern, handler_factory in routes:
+            route = (re.compile(pattern), handler_factory)
+            self._routes.append(rou)
 
         self.server_agent = server_agent
 
     @property
     def supported_protocols(self):
-        return tuple(self._protocols_map.keys())
+        return frozenset(self._protocols_map.keys())
 
     def get_connection(self, protocol, reader, writer, peername):
         return self._protocol_map[protocol](self, reader, writer, peername, loop = self._loop)
@@ -48,7 +54,7 @@ class Dispatcher:
         for pattern, handler_factory in self._routes:
             match = pattern.match(path)
             if match:
-                return handler_factory, match.groups(), match.groupdict()
+                return (handler_factory, match.groups(), match.groupdict())
 
         raise RoutingError("Route not found")
 
