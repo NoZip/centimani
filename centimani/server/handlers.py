@@ -11,17 +11,29 @@ from centimani.utils import HTTP_METHODS
 
 
 class Request:
+    __slots__ = ("method", "path", "query", "headers")
+
     def __init__(self, method="GET", path="/", query={}):
         self.method = method
         self.path = path
         self.query = query
         self.headers = Headers()
 
+    def __repr__(self):
+        fields = ("{0}: {1!r}".format(name, getattr(self, name)) for name in self.__slots__)
+        return "".join(("Request(", ", ".join(fields), ")"))
+
 
 class Response:
+    __slots__ = ("status", "headers")
+
     def __init__(self, status, headers = None):
         self.status = status
         self.headers = deepcopy(headers) if headers else Headers()
+
+    def __repr__(self):
+        fields = ("{0}: {1!r}".format(name, getattr(self, name)) for name in self.__slots__)
+        return "".join(("Response(", ", ".join(fields), ")"))
 
 
 #====================#

@@ -2,6 +2,7 @@ import asyncio
 import os
 import logging
 import re
+import sys
 
 from asyncio import coroutine
 from copy import deepcopy
@@ -11,6 +12,7 @@ from urllib.parse import unquote_plus, parse_qs
 import centimani.log
 
 from centimani.headers import Headers, HeaderParseError
+from centimani.log import MaxLevelFilter
 from centimani.server.dispatcher import RoutingError
 from centimani.server.handlers import AbstractConnectionHandler, AbstractResponseHandler, Request
 from centimani.utils import HTTP_STATUSES, HTTP_METHODS, BufferedBodyReader, ChunkedBodyReader
@@ -31,18 +33,16 @@ REQUEST_LINE_REGEX = re.compile(_request_line)
 
 class ConnectionLogger(logging.LoggerAdapter):
     def __init__(self, logger, peername):
-        super().__init__(logger, {})
-        self.peername = peername
+        super().__init__(logger, {"peername": peername})
 
     def process(self, msg, kwargs):
-        kwargs["peername"] = self.peername
-        return msg, kwargs
+        return "@{0[0]}:{0[1]}\n{1}".format(self.extra["peername"], msg), kwargs
 
 
 class ConnectionHandler(AbstractConnectionHandler):
     def __init__(self, dispatcher, reader, writer, peername, loop = None):
         super().__init__(dispatcher, reader, writer, peername, loop = loop)
-        self._logger = ConnectionLogger(logger, peername)
+        self.logger = ConnectionLogger(logger, peername)
 
         self.client_version = "1.0" 
         self.switch_to = None
@@ -62,6 +62,8 @@ class ConnectionHandler(AbstractConnectionHandler):
         if content_length:
             assert(len(content_length) == 1)
 
+            self.logger.debug("reading body")
+
             body_size = int(content_length[0])
 
             if body_size > 0:
@@ -78,6 +80,8 @@ class ConnectionHandler(AbstractConnectionHandler):
 
         elif "chunked" in transfert_encoding:
             assert transfert_encoding[-1] == "chunked"
+
+            self.logger.debug("reading chunked body")
             
             body_reader = ChunkedBodyReader(self.reader)
 
@@ -94,6 +98,8 @@ class ConnectionHandler(AbstractConnectionHandler):
                     stream.write(chunk)
 
         handler.is_body_read = True
+
+        self.logger.debug("body read")
 
     @coroutine
     def send_response(self, handler, status, headers = None, body = None, body_producer = None):
@@ -141,7 +147,7 @@ class ConnectionHandler(AbstractConnectionHandler):
 
         handler.is_response_sent = True
 
-        logger.debug("response sent")
+        logger.debug("response sent:\n{0}", header)
 
     @coroutine
     def send_error(self, status, headers = None, request = None, **kwargs):
@@ -170,11 +176,11 @@ class ConnectionHandler(AbstractConnectionHandler):
             header = yield from asyncio.wait_for(read_coroutine, 90)
         except asyncio.TimeoutError as error:
             # After request timeout, send an error response then close the connection
-            logger.info("request waiting timeout")
+            self.logger.info("request waiting timeout")
             yield from self.send_error(408)
             return False
         except ConnectionError:
-            logger.exception("connection error during request waiting")
+            self.logger.exception("connection error during request waiting")
             return False
 
         request_line, *headers_lines = header.split(b"\r\n")
@@ -185,10 +191,10 @@ class ConnectionHandler(AbstractConnectionHandler):
 
         if not request_line:
             # No request line = EOF, so we close the connection
-            logger.info("no request line, at EOF")
+            self.logger.info("no request line, at EOF")
             return False
 
-        logger.debug(request_line)
+        self.logger.debug(request_line)
 
         match = REQUEST_LINE_REGEX.match(request_line)
 
@@ -209,7 +215,7 @@ class ConnectionHandler(AbstractConnectionHandler):
 
         if is_malformed:
             # Bad request, connection is closed after error is send
-            logger.info("request line malformed")
+            self.logger.info("request line malformed")
             yield from self.send_error(400)
             return False
 
@@ -223,19 +229,19 @@ class ConnectionHandler(AbstractConnectionHandler):
                 query = parse_qs(query, strict_parsing = True)
             except ValueError:
                 # malformed - ignore the query
-                logger.info("malformed query")
+                self.logger.info("malformed query")
                 query = {}
         else:
             query = {}
 
         request = Request(method, path, query)
 
-        logger.debug(request)
+        self.logger.debug(request)
 
         # upgrade client_version if needed
         if self.client_version != version:
             self.client_version = version
-            logger.info("client version set to {0}", version)
+            self.logger.info("client version set to {0}", version)
 
         #-----------------------#
         # Parsing header fields #
@@ -245,11 +251,11 @@ class ConnectionHandler(AbstractConnectionHandler):
             request.headers.parse_lines(headers_lines)
         except HeaderParseError as error:
             # Bad request, connection is closed after error is send
-            logger.info("malformed header field {!s}", error)
+            self.logger.info("malformed header field {!s}", error)
             yield from self.send_error(400)
             return False
 
-        logger.debug(request.headers)
+        self.logger.debug(request.headers)
 
         #-------------------------------------#
         # Body length and encoding validation #
@@ -270,12 +276,12 @@ class ConnectionHandler(AbstractConnectionHandler):
         
         elif content_length:
             if len(content_length) > 1:
-                logger.info("multiple content-length headers")
+                self.logger.info("multiple content-length headers")
                 yield from self.send_error(400)
                 return False
 
             if not re.match(r"^[1-9][0-9]*$", content_length[0]):
-                logger.info("malformed content-length value")
+                self.logger.info("malformed content-length value")
                 yield from self.send_error(400)
                 return False
 
@@ -301,13 +307,13 @@ class ConnectionHandler(AbstractConnectionHandler):
             request_handler_factory, args, kwargs = self.dispatcher.find_route(path)
         except RoutingError as error:
             # No route finded, send 404 not find error
-            logger.info("route not find")
+            self.logger.info("route not find")
             yield from self.send_error(404, request = request)
             return keep_alive
 
         if method.lower() not in request_handler_factory.methods:
             # Method not implemented, send error 405 not implemented
-            logger.info("method not implemented")
+            self.logger.info("method not implemented")
             error_headers = Headers(allowed=request_handler_factory.methods)
             yield from self.send_error(405, error_headers, request = request)
             return keep_alive
@@ -316,7 +322,7 @@ class ConnectionHandler(AbstractConnectionHandler):
         # Request handler calling #
         #-------------------------#
 
-        logger.debug("request handling")
+        self.logger.debug("request handling")
 
         handler = request_handler_factory(self, request)
         method_handler = getattr(handler, method.lower())
@@ -325,10 +331,10 @@ class ConnectionHandler(AbstractConnectionHandler):
             tmp = method_handler(*args, **kwargs)
             yield from self._loop.create_task(tmp)
         except ConnectionError as error:
-            logger.exception("connection error during response handling")
+            self.logger.exception("connection error during response handling")
             return False
         except Exception as error:
-            logger.exception("error during response handling")
+            self.logger.exception("error during response handling")
             yield from self.send_error(500, request = request)
             return keep_alive
 
