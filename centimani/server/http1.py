@@ -47,13 +47,11 @@ class ConnectionHandler(AbstractConnectionHandler):
         self.client_version = "1.0" 
         self.switch_to = None
 
-    @coroutine
-    def read_body(self, handler, stream):
+    def create_body_reader(self, handler):
         assert isinstance(handler, AbstractResponseHandler)
-        assert not handler.is_body_read
+        assert handler._body_reader is None
 
         headers = handler.request.headers
-
         transfert_encoding = headers.get("transfert-encoding", [])
         content_length = headers.get("content-length", [])
 
@@ -62,50 +60,23 @@ class ConnectionHandler(AbstractConnectionHandler):
         if content_length:
             assert(len(content_length) == 1)
 
-            self.logger.debug("reading body")
-
             body_size = int(content_length[0])
-
-            if body_size > 0:
-                body_reader = BufferedBodyReader(self.reader, body_size)
-
-                running = True
-                while running:
-                    try:
-                        block = yield from body_reader.__anext__()
-                    except StopAsyncIteration:
-                        running = False
-                    else:
-                        stream.write(block)
+            body_reader = BufferedBodyReader(self.reader, body_size)
 
         elif "chunked" in transfert_encoding:
             assert transfert_encoding[-1] == "chunked"
 
-            self.logger.debug("reading chunked body")
+            if transfert_encoding[:-1]:
+                raise NotImplementedError
             
             body_reader = ChunkedBodyReader(self.reader)
 
-            if transfert_encoding[:-1]:
-                raise NotImplementedError
-
-            running = True
-            while running:
-                try:
-                    chunk = yield from body_reader.__anext__()
-                except StopAsyncIteration:
-                    running = False
-                else:
-                    stream.write(chunk)
-
-        handler.is_body_read = True
-
-        self.logger.debug("body read")
+        return body_reader
 
     @coroutine
     def send_response(self, handler, status, headers = None, body = None, body_producer = None):
         assert isinstance(handler, AbstractResponseHandler)
         assert status in HTTP_STATUSES.keys()
-        assert not handler.is_body_sent
 
         status_line = "HTTP/{!s} {:d} {!s}\r\n".format(
             self.client_version,
@@ -144,8 +115,6 @@ class ConnectionHandler(AbstractConnectionHandler):
         #     pass
 
         yield from self.writer.drain()
-
-        handler.is_response_sent = True
 
         logger.debug("response sent:\n{0}", header)
 

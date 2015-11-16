@@ -129,7 +129,24 @@ def rfc1123_datetime_decode(string):
     )
 
 
-class BufferedBodyReader:
+#==============#
+# Body readers #
+#==============#
+
+class AbstractBodyReader:
+    @coroutine
+    def read_into(self, stream):
+        running = True
+        while running:
+            try:
+                data = yield from self.__anext__()
+            except StopAsyncIteration:
+                running = False
+            else:
+                stream.write(data)
+
+
+class BufferedBodyReader(AbstractBodyReader):
     def __init__(self, reader, body_size = None, block_size = io.DEFAULT_BUFFER_SIZE):
         self.reader = reader
         self.body_size = body_size
@@ -176,7 +193,7 @@ class BufferedBodyReader:
         return block
 
 
-class ChunkedBodyReader:
+class ChunkedBodyReader(AbstractBodyReader):
     def __init__(self, reader):
         self.reader = reader
 

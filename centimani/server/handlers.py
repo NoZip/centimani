@@ -52,8 +52,7 @@ class AbstractConnectionHandler:
 
         # self.logger.info("peer connected")
 
-    @coroutine
-    def read_body(self, handler, stream):
+    def create_body_reader(self, handler):
         raise NotImplementedError
 
     @coroutine
@@ -88,14 +87,13 @@ class AbstractResponseHandler:
         self.connection_handler = connection_handler
         self.request = request
 
-        self.bytes_read = 0
-        self.bytes_sent = 0
+        self._body_reader = None
 
-        self.is_body_read = False
-        self.is_body_sent = False
-
-    def read_body(self, stream):
-        return self.connection_handler.read_body(self, stream)
+    def body_reader(self):
+        if self._body_reader is None:
+            self._body_reader = self.connection_handler.create_body_reader(self)
+        
+        return self._body_reader
 
     def send_response(self, status, headers = None, body = None, body_producer = None):
         return self.connection_handler.send_response(self, status, headers, body, body_producer)
@@ -105,9 +103,10 @@ class AbstractResponseHandler:
 
     @coroutine
     def cleanup(self):
-        if self.request and not self.is_body_read:
+        if self.request:
             null_writer = File.open(os.devnull, "wb")
-            yield from self.read_body(stream = null_writer)
+            body_reader = self.body_reader()
+            yield from body_reader.read_into(null_writer)
 
     
 class ErrorResponseHandler(AbstractResponseHandler):
