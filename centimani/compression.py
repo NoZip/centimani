@@ -2,34 +2,29 @@ import zlib
 
 from asyncio import coroutine
 
-SUPPORTED_COMPRESSIONS = frozenset(("deflate", "gzip"))
+DECOMPRESSOR_MAP = {
+    "gzip" = zlib.decompressobj(wbits = zlib.MAX_WBITS|16),
+    "deflate" = zlib.decompressobj(wbits = -zlib.MAX_WBITS),
+}
 
 class DecompressPipe:
-    @staticmethod
-    def _get_decoder(name):
-        if name == "deflate":
-            return zlib.decompressobj(wbits = -zlib.MAX_WBITS)
-        elif name == "gzip" or name == "x-gzip":
-            return zlib.decompressobj(wbits = zlib.MAX_WBITS|16)
-        else:
-            raise Exception(name + " compression not supported")
-
-    def __init__(self, reader, encoding_chain):
-        self._reader = reader
-        self._decoder_chain = [self._get_decoder(name) for name in reversed(encoding_chain)]
+    def __init__(self, aiterator, encoding_chain):
+        self._aiterator = aiterator
+        self._decoder_chain = [DECOMPRESSOR_MAP[name] for name in reversed(encoding_chain)]
 
     @coroutine
     def __aiter__(self):
+        self._aiterator = yield from self._aiterator.__aiter__()
         return self
 
     @coroutine
     def __anext__(self):
         try:
-            chunk = yield from self._reader.__anext__()
+            data = yield from self._aiterator.__anext__()
         except StopAsyncIteration:
             raise StopAsyncIteration
 
         for decoder in self._decoder_chain:
-            chunk = decoder.decompress(chunk)
+            data = decoder.decompress(data)
 
-        return chunk
+        return data
