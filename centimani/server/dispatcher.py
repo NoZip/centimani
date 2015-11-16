@@ -39,7 +39,7 @@ class Dispatcher:
 
         for pattern, handler_factory in routes:
             route = (re.compile(pattern), handler_factory)
-            self._routes.append(rou)
+            self._routes.append(route)
 
         self.server_agent = server_agent
 
