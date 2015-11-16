@@ -257,6 +257,14 @@ class ConnectionHandler(AbstractConnectionHandler):
 
         self.logger.debug(request.headers)
 
+        # the client wants a 100 Continue response before sending data
+        if "100-continue" in request.headers.get("except", []):
+            self.logger.info("no support for 100-continue expectations")
+            headers = Headers(connection = "close")
+            yield from self.send_error(417, headers)
+            return False
+
+
         #-------------------------------------#
         # Body length and encoding validation #
         #-------------------------------------#
