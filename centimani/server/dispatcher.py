@@ -33,25 +33,25 @@ class Dispatcher:
         loop = None
     ):
         self._loop = loop or asyncio.get_event_loop()
-        self._routes = []
-        self._error_handler_factory = error_handler_factory
-        self._protocol_map = protocols_map
+        self.routes = []
+        self.error_handler_factory = error_handler_factory
+        self.protocol_map = protocols_map
+        self.server_agent = server_agent
+        self.connections = {}
 
         for pattern, handler_factory in routes:
             route = (re.compile(pattern), handler_factory)
-            self._routes.append(route)
-
-        self.server_agent = server_agent
+            self.routes.append(route)
 
     @property
     def supported_protocols(self):
-        return frozenset(self._protocols_map.keys())
+        return frozenset(self.protocols_map.keys())
 
-    def get_connection(self, protocol, reader, writer, peername):
-        return self._protocol_map[protocol](self, reader, writer, peername, loop = self._loop)
+    def create_connection(self, protocol, reader, writer, peername):
+        return self.protocol_map[protocol](self, reader, writer, peername, loop = self._loop)
 
     def find_route(self, path):
-        for pattern, handler_factory in self._routes:
+        for pattern, handler_factory in self.routes:
             match = pattern.match(path)
             if match:
                 return (handler_factory, match.groups(), match.groupdict())
@@ -59,7 +59,7 @@ class Dispatcher:
         raise RoutingError("Route not found")
 
     @coroutine
-    def _handle_connection(self, reader, writer):
+    def handle_connection(self, reader, writer):
         peername = writer.get_extra_info("peername")
         ssl_object = writer.get_extra_info("ssl_object")
 
@@ -69,15 +69,9 @@ class Dispatcher:
         else:
             protocol = "http/1.1"
 
-        connection = self.get_connection(protocol, reader, writer, peername)
-
-        keep_alive = True
-        while keep_alive:
-            keep_alive = yield from connection.run()
-            yield from connection.cleanup()
-
-        # Closing connection
-        connection.close()
+        connection = self.create_connection(protocol, reader, writer, peername)
+        task = self._loop.create_task(connection.run())
+        self.connections[peername] = (connection, task)
 
     @coroutine
     def listen(self, host="localhost", port=8080):
@@ -89,7 +83,7 @@ class Dispatcher:
         # ssl_context.set_alpn_protocols(self.supported_protocols)
 
         server = yield from asyncioplus.iostream.start_server(
-            self._handle_connection,
+            self.handle_connection,
             host = host,
             port = port,
             # ssl = ssl_context,

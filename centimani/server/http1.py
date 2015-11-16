@@ -116,13 +116,13 @@ class ConnectionHandler(AbstractConnectionHandler):
 
         yield from self.writer.drain()
 
-        logger.debug("response sent:\n{0}", header)
+        self.logger.debug("response sent:\n{0}", header)
 
     @coroutine
     def send_error(self, status, headers = None, request = None, **kwargs):
         assert status in HTTP_STATUSES.keys()
 
-        ErrorHandler = self.dispatcher._error_handler_factory
+        ErrorHandler = self.dispatcher.error_handler_factory
         handler = ErrorHandler(self, request)
         self.current_handler = handler
 
@@ -136,6 +136,22 @@ class ConnectionHandler(AbstractConnectionHandler):
 
     @coroutine
     def run(self):
+        self.logger.info("connection ready")
+
+        self.keep_alive = True
+        while self.keep_alive:
+            yield from self.handle_request()
+
+            if self.keep_alive:
+                yield from self.cleanup()
+
+            #TODO: upgrade protocol
+
+        self.logger.info("closing connection")
+        self.close()
+
+    @coroutine
+    def handle_request(self):
         #-----------------#
         # Receive request #
         #-----------------#
@@ -147,10 +163,12 @@ class ConnectionHandler(AbstractConnectionHandler):
             # After request timeout, send an error response then close the connection
             self.logger.info("request waiting timeout")
             yield from self.send_error(408)
-            return False
+            self.keep_alive = False
+            return
         except ConnectionError:
             self.logger.exception("connection error during request waiting")
-            return False
+            self.keep_alive = False
+            return
 
         request_line, *headers_lines = header.split(b"\r\n")
 
@@ -161,7 +179,8 @@ class ConnectionHandler(AbstractConnectionHandler):
         if not request_line:
             # No request line = EOF, so we close the connection
             self.logger.info("no request line, at EOF")
-            return False
+            self.keep_alive = False
+            return
 
         self.logger.debug(request_line)
 
@@ -186,7 +205,8 @@ class ConnectionHandler(AbstractConnectionHandler):
             # Bad request, connection is closed after error is send
             self.logger.info("request line malformed")
             yield from self.send_error(400)
-            return False
+            self.keep_alive = False
+            return
 
         url_split = url.split("?", maxsplit = 1)
 
@@ -208,7 +228,7 @@ class ConnectionHandler(AbstractConnectionHandler):
         self.logger.debug(request)
 
         # upgrade client_version if needed
-        if self.client_version != version:
+        if self.client_version > version:
             self.client_version = version
             self.logger.info("client version set to {0}", version)
 
@@ -222,7 +242,8 @@ class ConnectionHandler(AbstractConnectionHandler):
             # Bad request, connection is closed after error is send
             self.logger.info("malformed header field {!s}", error)
             yield from self.send_error(400)
-            return False
+            self.keep_alive = False
+            return
 
         self.logger.debug(request.headers)
 
@@ -231,7 +252,8 @@ class ConnectionHandler(AbstractConnectionHandler):
             self.logger.info("no support for 100-continue expectations")
             headers = Headers(connection = "close")
             yield from self.send_error(417, headers)
-            return False
+            self.keep_alive = False
+            return
 
 
         #-------------------------------------#
@@ -248,19 +270,22 @@ class ConnectionHandler(AbstractConnectionHandler):
             
             if transfert_encoding[-1] != "chunked":
                 yield from self.send_error(400)
-                return False
+                self.keep_alive = False
+                return
             
         
         elif content_length:
             if len(content_length) > 1:
                 self.logger.info("multiple content-length headers")
                 yield from self.send_error(400)
-                return False
+                self.keep_alive = False
+                return
 
             if not re.match(r"^[1-9][0-9]*$", content_length[0]):
                 self.logger.info("malformed content-length value")
                 yield from self.send_error(400)
-                return False
+                self.keep_alive = False
+                return
 
         else:
             request.headers.set("content-length", 0)
@@ -271,7 +296,7 @@ class ConnectionHandler(AbstractConnectionHandler):
 
         connection = request.headers.get("connection", [])
 
-        keep_alive = (
+        self.keep_alive = (
             version == "1.1" and "close" not in connection
             or version == "1.0" and "keep_alive" in connection
         )
@@ -286,14 +311,14 @@ class ConnectionHandler(AbstractConnectionHandler):
             # No route finded, send 404 not find error
             self.logger.info("route not find")
             yield from self.send_error(404, request = request)
-            return keep_alive
+            return
 
         if method.lower() not in request_handler_factory.methods:
             # Method not implemented, send error 405 not implemented
             self.logger.info("method not implemented")
             error_headers = Headers(allowed=request_handler_factory.methods)
             yield from self.send_error(405, error_headers, request = request)
-            return keep_alive
+            return
 
         #-------------------------#
         # Request handler calling #
@@ -309,10 +334,9 @@ class ConnectionHandler(AbstractConnectionHandler):
             yield from self._loop.create_task(tmp)
         except ConnectionError as error:
             self.logger.exception("connection error during response handling")
-            return False
+            self.keep_alive = False
+            return
         except Exception as error:
             self.logger.exception("error during response handling")
             yield from self.send_error(500, request = request)
-            return keep_alive
-
-        return keep_alive
+            return

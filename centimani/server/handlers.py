@@ -69,6 +69,7 @@ class AbstractConnectionHandler:
 
     def close(self):
         # self.logger.info("closing connection")
+        del self.dispatcher.connections[peername]
         self.writer.close()
 
     @coroutine
