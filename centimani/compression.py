@@ -3,8 +3,8 @@ import zlib
 from asyncio import coroutine
 
 DECOMPRESSOR_MAP = {
-    "gzip" = zlib.decompressobj(wbits = zlib.MAX_WBITS|16),
-    "deflate" = zlib.decompressobj(wbits = -zlib.MAX_WBITS),
+    "gzip": zlib.decompressobj(wbits = zlib.MAX_WBITS|16),
+    "deflate": zlib.decompressobj(wbits = -zlib.MAX_WBITS),
 }
 
 class DecompressPipe:
