@@ -24,6 +24,10 @@ DEFAULT_PROTOCOL_MAP = {
 
 
 class Dispatcher:
+    @staticmethod
+    def _build_route(route_tuple):
+        pattern, handler_factory = route_tuple
+        return (re.compile(pattern), handler_factory)
 
     def __init__(self,
         routes,
@@ -33,15 +37,13 @@ class Dispatcher:
         loop = None
     ):
         self._loop = loop or asyncio.get_event_loop()
-        self.routes = []
+        self.routes = tuple(map(self._build_route, routes))
         self.error_handler_factory = error_handler_factory
         self.protocol_map = protocols_map
         self.server_agent = server_agent
         self.connections = {}
 
-        for pattern, handler_factory in routes:
-            route = (re.compile(pattern), handler_factory)
-            self.routes.append(route)
+        logger.debug(self.routes)
 
     @property
     def supported_protocols(self):
