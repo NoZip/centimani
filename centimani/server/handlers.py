@@ -54,7 +54,7 @@ class AbstractConnection:
 
     def close(self):
         # self.logger.info("closing connection")
-        del self.dispatcher.connections[peername]
+        del self.dispatcher.connections[self.peername]
         self.writer.close()
 
 
