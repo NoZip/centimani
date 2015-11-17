@@ -40,8 +40,9 @@ class ConnectionLogger(logging.LoggerAdapter):
 
 
 class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
-    def __init__(self, dispatcher, reader, writer, peername, loop = None):
+    def __init__(self, dispatcher, reader, writer, peername, request_timeout = 60, loop = None):
         super().__init__(dispatcher, reader, writer, peername, loop = loop)
+        self.request_timeout = request_timeout
         self.logger = ConnectionLogger(logger, peername)
         self.current_handler = None
         self.client_version = "1.0"
@@ -83,7 +84,8 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
 
         headers_addons = Headers(
             date = datetime.utcnow(),
-            server = self.dispatcher.server_agent
+            server = self.dispatcher.server_agent,
+            connection = "keep-alive" if self.keep_alive else "close"
         )
 
         headers = headers if headers else Headers()
@@ -156,16 +158,16 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
 
         try:
             read_coroutine = self.reader.read_until(b"\r\n\r\n")
-            header = yield from asyncio.wait_for(read_coroutine, 90)
+            header = yield from asyncio.wait_for(read_coroutine, self.request_timeout)
         except asyncio.TimeoutError as error:
             # After request timeout, send an error response then close the connection
             self.logger.info("request waiting timeout")
-            yield from self.send_error(408)
             self.keep_alive = False
+            yield from self.send_error(408)
             return
         except ConnectionError:
-            self.logger.exception("connection error during request waiting")
             self.keep_alive = False
+            self.logger.exception("connection error during request waiting")
             return
 
         request_line, *headers_lines = header.split(b"\r\n")
@@ -202,8 +204,8 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
         if is_malformed:
             # Bad request, connection is closed after error is send
             self.logger.info("request line malformed")
-            yield from self.send_error(400)
             self.keep_alive = False
+            yield from self.send_error(400)
             return
 
         url_split = url.split("?", maxsplit = 1)
@@ -239,19 +241,19 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
         except HeaderParseError as error:
             # Bad request, connection is closed after error is send
             self.logger.info("malformed header field {!s}", error)
-            yield from self.send_error(400)
             self.keep_alive = False
+            yield from self.send_error(400)
             return
 
         self.logger.debug(request.headers)
 
         # the client wants a 100 Continue response before sending data
-        if "100-continue" in request.headers.get("except", []):
-            self.logger.info("no support for 100-continue expectations")
-            headers = Headers(connection = "close")
-            yield from self.send_error(417, headers)
-            self.keep_alive = False
-            return
+        # if "100-continue" in request.headers.get("except", []):
+        #     self.logger.info("no support for 100-continue expectations")
+        #     headers = Headers(connection = "close")
+        #     yield from self.send_error(417, headers)
+        #     self.keep_alive = False
+        #     return
 
 
         #-------------------------------------#
@@ -267,22 +269,22 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
                 del request.headers["content-length"]
             
             if transfert_encoding[-1] != "chunked":
-                yield from self.send_error(400)
                 self.keep_alive = False
+                yield from self.send_error(400)
                 return
             
         
         elif content_length:
             if len(content_length) > 1:
                 self.logger.info("multiple content-length headers")
-                yield from self.send_error(400)
                 self.keep_alive = False
+                yield from self.send_error(400)
                 return
 
             if not re.match(r"^[1-9][0-9]*$", content_length[0]):
                 self.logger.info("malformed content-length value")
-                yield from self.send_error(400)
                 self.keep_alive = False
+                yield from self.send_error(400)
                 return
 
         else:
@@ -322,17 +324,27 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
         # Request handler calling #
         #-------------------------#
 
-        self.logger.debug("request handling")
-
         handler = request_handler_factory(self, request)
         method_handler = getattr(handler, method.lower())
+
+        can_continue = yield from handler.can_continue()
+
+        if not can_continue:
+            if "100-continue" in request.headers.get("except", []):
+                self.keep_alive = False
+                if not handler.is_response_sent:
+                    yield from handler.send_error(417)
+            return
+
+        if "100-continue" in request.headers.get("except", []):
+            yield from handler.send_response(100)
 
         try:
             tmp = method_handler(*args, **kwargs)
             yield from self._loop.create_task(tmp)
         except ConnectionError as error:
-            self.logger.exception("connection error during response handling")
             self.keep_alive = False
+            self.logger.exception("connection error during response handling")
             return
         except Exception as error:
             self.logger.exception("error during response handling")

@@ -102,6 +102,10 @@ class AbstractResponseHandler:
         
         return self._body_reader
 
+    @coroutine
+    def can_continue(self):
+        return True
+
     def send_response(self, status, headers = None, body = None, body_producer = None):
         assert not self.is_response_sent
 
