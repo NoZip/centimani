@@ -40,7 +40,7 @@ class Response:
 # Connection handler #
 #====================#
 
-class AbstractConnectionHandler:
+class AbstractConnection:
     def __init__(self, dispatcher, reader, writer, peername, loop = None):
         self._loop = loop or asyncio.get_event_loop()
         self.dispatcher = dispatcher
@@ -48,15 +48,30 @@ class AbstractConnectionHandler:
         self.writer = writer
         self.peername = peername
 
-        self.current_handler = None
+    @coroutine
+    def run():
+        raise NotImplementedError
 
-        # self.logger.info("peer connected")
+    def close(self):
+        # self.logger.info("closing connection")
+        del self.dispatcher.connections[peername]
+        self.writer.close()
 
+
+#=================#
+# Request handler #
+#=================#
+
+class AbstractRequestHandler:
     def create_body_reader(self, handler):
         raise NotImplementedError
 
     @coroutine
-    def send_response(self, handler, status, headers = None, body = None, body_producer = None):
+    def handle_request():
+        raise NotImplementedError
+
+    @coroutine
+    def send_response(self, status, headers = None, body = None, body_producer = None):
         raise NotImplementedError
 
     @coroutine
@@ -67,40 +82,39 @@ class AbstractConnectionHandler:
     def cleanup(self):
         raise not NotImplementedError
 
-    def close(self):
-        # self.logger.info("closing connection")
-        del self.dispatcher.connections[peername]
-        self.writer.close()
-
-    @coroutine
-    def run(self):
-        raise NotImplementedError
-
 
 #===================#
 # Response handlers #
 #===================#
 
 class AbstractResponseHandler:
-    def __init__(self, connection_handler, request = None):
-        assert isinstance(connection_handler, AbstractConnectionHandler)
-
-        self.connection_handler = connection_handler
+    def __init__(self, request_handler, request = None):
+        self.request_handler = request_handler
         self.request = request
 
         self._body_reader = None
 
+        self.is_response_sent = False
+
     def body_reader(self):
         if self._body_reader is None:
-            self._body_reader = self.connection_handler.create_body_reader(self)
+            self._body_reader = self.request_handler.create_body_reader(self)
         
         return self._body_reader
 
     def send_response(self, status, headers = None, body = None, body_producer = None):
-        return self.connection_handler.send_response(self, status, headers, body, body_producer)
+        assert not self.is_response_sent
 
-    def send_error(self, status, headers = None, request = None, **kwargs):
-        return self.connection_handler.send_error(status, headers, request, **kwargs)
+        if status >= 200:
+            self.is_response_sent = True
+
+        return self.request_handler.send_response(status, headers, body, body_producer)
+
+    def send_error(self, status, headers = None, **kwargs):
+        assert not self.is_response_sent
+
+        self.is_response_sent = True
+        return self.request_handler.send_error(status, headers, self.request, **kwargs)
 
     @coroutine
     def cleanup(self):
@@ -113,7 +127,7 @@ class AbstractResponseHandler:
 class ErrorResponseHandler(AbstractResponseHandler):
     @coroutine
     def error(self, status, headers = None, **kwargs):
-        yield from self.send_response(status, headers)
+        yield from self.request_handler.send_response(status, headers)
 
 
 class MetaResponseHandler(type):
@@ -135,5 +149,5 @@ class MetaResponseHandler(type):
 
 
 class ResponseHandler(AbstractResponseHandler, metaclass = MetaResponseHandler):
-    def __init__(self, connection_handler, request):
-        super().__init__(connection_handler, request)
+    def __init__(self, request_handler, request):
+        super().__init__(request_handler, request)

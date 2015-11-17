@@ -14,7 +14,7 @@ import centimani.log
 from centimani.headers import Headers, HeaderParseError
 from centimani.log import MaxLevelFilter
 from centimani.server.dispatcher import RoutingError
-from centimani.server.handlers import AbstractConnectionHandler, AbstractResponseHandler, Request
+from centimani.server.handlers import AbstractConnection, AbstractRequestHandler, AbstractResponseHandler, Request
 from centimani.utils import HTTP_STATUSES, HTTP_METHODS, BufferedBodyReader, ChunkedBodyReader
 
 if "StopAsyncIteration" not in dir(__builtins__):
@@ -39,17 +39,15 @@ class ConnectionLogger(logging.LoggerAdapter):
         return "@{0[0]}:{0[1]}\n{1}".format(self.extra["peername"], msg), kwargs
 
 
-class ConnectionHandler(AbstractConnectionHandler):
+class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
     def __init__(self, dispatcher, reader, writer, peername, loop = None):
         super().__init__(dispatcher, reader, writer, peername, loop = loop)
         self.logger = ConnectionLogger(logger, peername)
-
-        self.client_version = "1.0" 
-        self.switch_to = None
+        self.current_handler = None
+        self.client_version = "1.0"
 
     def create_body_reader(self, handler):
         assert isinstance(handler, AbstractResponseHandler)
-        assert handler._body_reader is None
 
         headers = handler.request.headers
         transfert_encoding = headers.get("transfert-encoding", [])
@@ -74,9 +72,8 @@ class ConnectionHandler(AbstractConnectionHandler):
         return body_reader
 
     @coroutine
-    def send_response(self, handler, status, headers = None, body = None, body_producer = None):
-        assert isinstance(handler, AbstractResponseHandler)
-        assert status in HTTP_STATUSES.keys()
+    def send_response(self, status, headers = None, body = None, body_producer = None):
+        assert status in HTTP_STATUSES
 
         status_line = "HTTP/{!s} {:d} {!s}\r\n".format(
             self.client_version,
@@ -120,7 +117,8 @@ class ConnectionHandler(AbstractConnectionHandler):
 
     @coroutine
     def send_error(self, status, headers = None, request = None, **kwargs):
-        assert status in HTTP_STATUSES.keys()
+        assert status >= 400
+        assert status in HTTP_STATUSES
 
         ErrorHandler = self.dispatcher.error_handler_factory
         handler = ErrorHandler(self, request)
