@@ -1,3 +1,27 @@
+"""This module contains miscellaneous functions and classes used by many
+other modules of centimani.
+
+
+Constants
+=========
+
+:HTTP_STATUSES: A mapping of all HTTP statuses mapped to their reason.
+:HTTP_METHODS: A set of all HTTP methods.
+
+
+RFC1123 datetime conversion
+===========================
+
+RFC1123 defines a date format used in HTTP. This module part defines
+the functions to deal with this date format.
+
+:is_rfc1123_datetime: Checks if a string is a valid datetime.
+:rfc1123_datetime_encode: convert a ``datetime`` instance to a
+    datetime string.
+:rfc1123_datetime_decode: Parses a string in order to extract a
+    ``datetime`` from it.
+"""
+
 import io
 import re
 
@@ -77,9 +101,8 @@ HTTP_STATUSES = {
 }
 
 
-HTTP_METHODS = frozenset((
-    "GET", "HEAD", "POST", "OPTIONS", "CONNECT", "TRACE", "PUT", "PATCH", "DELETE"
-))
+HTTP_METHODS = frozenset(("GET", "HEAD", "POST", "OPTIONS", "CONNECT",
+    "TRACE", "PUT", "PATCH", "DELETE"))
 
 
 #=============================#
@@ -87,16 +110,22 @@ HTTP_METHODS = frozenset((
 #=============================#
 
 WEEKDAY = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-MONTH = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
-_rfc1123_datetime = r"^[A-Z][a-z]{2}, ([0-9]{1,2}) ([A-Z][a-z]{2}) ([0-9]{2}|[0-9]{4}) ([0-9]{2}):([0-9]{2}):([0-9]{2}) GMT$"
-RFC1123_DATETIME_REGEX = re.compile(_rfc1123_datetime)
+MONTH = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul",
+    "Aug", "Sep", "Oct", "Nov", "Dec")
 
-def is_rfc1123_datetime(value):
-    assert isinstance(value, str)
-    return RFC1123_DATETIME_REGEX.match(value) is not None
+_RFC1123_DATETIME = r"^[A-Z][a-z]{2}, "
+_RFC1123_DATETIME += r"([0-9]{1,2}) ([A-Z][a-z]{2}) ([0-9]{2}|[0-9]{4}) "
+_RFC1123_DATETIME += r"([0-9]{2}):([0-9]{2}):([0-9]{2}) GMT$"
+RFC1123_DATETIME_REGEX = re.compile(_RFC1123_DATETIME)
+
+def is_rfc1123_datetime(string):
+    """Checks if ``string`` is a valid datetime.""" 
+    assert isinstance(string, str)
+    return RFC1123_DATETIME_REGEX.match(string) is not None
 
 def rfc1123_datetime_encode(dt):
+    """Convert a ``datetime`` object into a RFC1123 datetime string."""
     assert isinstance(dt, datetime)
 
     return "{0}, {1} {2} {3} {4:02}:{5:02}:{6:02} {7}".format(
@@ -111,118 +140,26 @@ def rfc1123_datetime_encode(dt):
     )
 
 def rfc1123_datetime_decode(string):
+    """Parse ``string`` to get a corresponding datetime object.
+    Raise a ``ValueError if ``string```is not a valid RFC1123 datetime
+    representation.
+    """
+    assert isinstance(string, str)
+
     match = RFC1123_DATETIME_REGEX.match(string)
 
     if not match:
-        msg = "{} is not a valid RFC1123 date".format(string)
+        msg = "{} is not a valid RFC1123 datetime".format(string)
         raise ValueError(msg)
 
     groups = match.groups()
+    year = int(groups[2]) if len(groups[2]) == 4 else int("19" + groups[2])
 
     return datetime(
-        year = int(groups[2]) if len(groups[2]) == 4 else int("19" + groups[2]),
-        month = MONTH.index(groups[1]) + 1,
-        day = int(groups[0]),
-        hour = int(groups[3]),
-        minute = int(groups[4]),
-        second = int(groups[5])
+        year=year,
+        month=MONTH.index(groups[1]) + 1,
+        day=int(groups[0]),
+        hour=int(groups[3]),
+        minute=int(groups[4]),
+        second=int(groups[5])
     )
-
-
-#==============#
-# Body readers #
-#==============#
-
-class AbstractBodyReader:
-    @coroutine
-    def read_into(self, stream):
-        running = True
-        while running:
-            try:
-                data = yield from self.__anext__()
-            except StopAsyncIteration:
-                running = False
-            else:
-                stream.write(data)
-
-
-class BufferedBodyReader(AbstractBodyReader):
-    def __init__(self, reader, body_size = None, block_size = io.DEFAULT_BUFFER_SIZE):
-        self.reader = reader
-        self.body_size = body_size
-        self.block_size = block_size
-
-        self.current_block = 0
-
-        if self.body_size is not None:
-            self.block_count, self.last_block_size = divmod(self.body_size, self.block_size)
-
-        self.bytes_read = 0
-
-    @property
-    def is_complete(self):
-        return self.bytes_read == self.body_size
-
-    @coroutine
-    def __aiter__(self):
-        return self
-
-    @coroutine
-    def __anext__(self):
-        if self.body_size is not None:
-            if self.current_block < self.block_count:
-                block_size = self.block_size
-            elif self.current_block == self.block_count:
-                block_size = self.last_block_size
-            elif self.current_block > self.block_count:
-                block_size = 0
-        else:
-            block_size = self.block_size
-
-        if block_size == 0:
-            raise StopAsyncIteration
-
-        block = yield from self.reader.read(block_size)
-
-        if block == b"":
-            raise StopAsyncIteration
-
-        self.bytes_read += len(block)
-        self.current_block += 1
-
-        return block
-
-
-class ChunkedBodyReader(AbstractBodyReader):
-    def __init__(self, reader):
-        self.reader = reader
-
-        self.current_chunk = 0
-        # self.body_size = 0
-
-    @coroutine
-    def __aiter__(self):
-        return self
-
-    @coroutine
-    def __anext__(self):
-        chunk_header = yield from self.reader.read_until(b"\r\n")
-        chunk_size = int(chunk_header, base = 16)
-
-        if chunk_size == 0:
-            raise StopAsyncIteration
-
-        chunk = yield from self.reader.read(chunk_size + 2)
-        chunk, check_crlf = chunk[:-2], chunk[-2:]
-
-        if check_crlf != b"\r\n":
-            raise Exception("chunk not followed by CRLF")
-
-        if chunk == b"":
-            # TODO: parse trailer headers
-            raise StopAsyncIteration
-
-        # self.body_size += len(chunk)
-        self.current_chunk += 1
-
-        return chunk

@@ -15,7 +15,8 @@ from centimani.headers import Headers, HeaderParseError
 from centimani.log import MaxLevelFilter
 from centimani.server.dispatcher import RoutingError
 from centimani.server.handlers import AbstractConnection, AbstractRequestHandler, AbstractResponseHandler, Request
-from centimani.utils import HTTP_STATUSES, HTTP_METHODS, BufferedBodyReader, ChunkedBodyReader
+from centimani.streamutils import BufferedBodyReader, ChunkedBodyReader
+from centimani.utils import HTTP_STATUSES, HTTP_METHODS
 
 if "StopAsyncIteration" not in dir(__builtins__):
     from asyncioplus.utils import StopAsyncIteration
