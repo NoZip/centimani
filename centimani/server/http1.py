@@ -20,15 +20,15 @@ from centimani.utils import HTTP_STATUSES, HTTP_METHODS, BufferedBodyReader, Chu
 if "StopAsyncIteration" not in dir(__builtins__):
     from asyncioplus.utils import StopAsyncIteration
 
-logger = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)
 
-_segment = rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@]|%[0-9A-F]{2})+"
-_path = rb"/(?:" + _segment + rb"(?:/" + _segment + rb")*/?)?"
-_query = rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@/?]|%[0-9A-F]{2})*"
+_SEGMENT = rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@]|%[0-9A-F]{2})+"
+_PATH = rb"/(?:" + _SEGMENT + rb"(?:/" + _SEGMENT + rb")*/?)?"
+_QUERY = rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@/?]|%[0-9A-F]{2})*"
 
 
-_request_line = rb"^([A-Z]+)[ \t]+(\*|" + _path + rb"(?:\?" + _query + rb")?)[ \t]+HTTP/(\d+\.\d+)$"
-REQUEST_LINE_REGEX = re.compile(_request_line)
+_REQUEST_LINE = rb"^([A-Z]+)[ \t]+(\*|" + _PATH + rb")(?:\?(" + _QUERY + rb"))?[ \t]+HTTP/(\d+\.\d+)$"
+REQUEST_LINE_REGEX = re.compile(_REQUEST_LINE)
 
 
 class ConnectionLogger(logging.LoggerAdapter):
@@ -40,12 +40,13 @@ class ConnectionLogger(logging.LoggerAdapter):
 
 
 class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
-    def __init__(self, dispatcher, reader, writer, peername, request_timeout = 60, loop = None):
-        super().__init__(dispatcher, reader, writer, peername, loop = loop)
+    def __init__(self, dispatcher, reader, writer, peername, request_timeout=60, loop=None):
+        super().__init__(dispatcher, reader, writer, peername, loop=loop)
         self.request_timeout = request_timeout
-        self.logger = ConnectionLogger(logger, peername)
+        self.logger = ConnectionLogger(_LOGGER, peername)
         self.current_handler = None
         self.client_version = "1.0"
+        self.keep_alive = True
 
     def create_body_reader(self, handler):
         assert isinstance(handler, AbstractResponseHandler)
@@ -73,7 +74,7 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
         return body_reader
 
     @coroutine
-    def send_response(self, status, headers = None, body = None, body_producer = None):
+    def send_response(self, status, headers=None, body=None, body_producer=None):
         assert status in HTTP_STATUSES
 
         status_line = "HTTP/{!s} {:d} {!s}\r\n".format(
@@ -118,7 +119,7 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
         self.logger.debug("response sent:\n{0}", header)
 
     @coroutine
-    def send_error(self, status, headers = None, request = None, **kwargs):
+    def send_error(self, status, headers=None, request=None, **kwargs):
         assert status >= 400
         assert status in HTTP_STATUSES
 
@@ -185,20 +186,16 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
         self.logger.debug(request_line)
 
         match = REQUEST_LINE_REGEX.match(request_line)
-
-        if match:
-            method, url, version = map(lambda s: s.decode("ascii"), match.groups(b""))
         
         # A request is well formed if and only if:
         # - the method is a valid HTTP method
         # - the version string is in the form "HTTP/1.1"
         # - the url match the format defined in RFC 3986
-        # - for security reasons, the percent encoded values for "/" and "\", respectively %2F and
-        #   %5C cannot be present in the url.
+        # - for security reasons, the percent encoded values for "/" and
+        #  "\", respectively %2F and %5C cannot be present in the url.
         is_malformed = (
             not match
-            or method not in HTTP_METHODS
-            or ("%2F" in url or "%5C" in url)
+            or (b"%2F" in request_line or b"%5C" in request_line)
         )
 
         if is_malformed:
@@ -208,14 +205,13 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
             yield from self.send_error(400)
             return
 
-        url_split = url.split("?", maxsplit = 1)
-
-        path = unquote_plus(url_split[0])
-        query = url_split[1] if len(url_split) > 1 else ""
+        self.logger.debug(match.groups(b""))
+        tmp = (s.decode("ascii") for s in match.groups(b""))
+        method, path, query, version = tmp
 
         if query:
             try:
-                query = parse_qs(query, strict_parsing = True)
+                query = parse_qs(query, strict_parsing=True)
             except ValueError:
                 # malformed - ignore the query
                 self.logger.info("malformed query")
@@ -228,7 +224,7 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
         self.logger.debug(request)
 
         # upgrade client_version if needed
-        if self.client_version > version:
+        if self.client_version < version:
             self.client_version = version
             self.logger.info("client version set to {0}", version)
 
@@ -246,15 +242,6 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
             return
 
         self.logger.debug(request.headers)
-
-        # the client wants a 100 Continue response before sending data
-        # if "100-continue" in request.headers.get("except", []):
-        #     self.logger.info("no support for 100-continue expectations")
-        #     headers = Headers(connection = "close")
-        #     yield from self.send_error(417, headers)
-        #     self.keep_alive = False
-        #     return
-
 
         #-------------------------------------#
         # Body length and encoding validation #
@@ -306,18 +293,19 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
         #-----------------#
 
         try:
-            request_handler_factory, args, kwargs = self.dispatcher.find_route(path)
+            tmp = self.dispatcher.find_route(request.path)
+            request_handler_factory, args, kwargs = tmp
         except RoutingError as error:
             # No route finded, send 404 not find error
             self.logger.info("route not find")
-            yield from self.send_error(404, request = request)
+            yield from self.send_error(404, request=request)
             return
 
         if method.lower() not in request_handler_factory.methods:
             # Method not implemented, send error 405 not implemented
             self.logger.info("method not implemented")
             error_headers = Headers(allowed=request_handler_factory.methods)
-            yield from self.send_error(405, error_headers, request = request)
+            yield from self.send_error(405, error_headers, request=request)
             return
 
         #-------------------------#
@@ -348,5 +336,5 @@ class ConnectionHandler(AbstractConnection, AbstractRequestHandler):
             return
         except Exception as error:
             self.logger.exception("error during response handling")
-            yield from self.send_error(500, request = request)
+            yield from self.send_error(500, request=request)
             return
