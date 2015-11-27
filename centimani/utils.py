@@ -101,8 +101,8 @@ HTTP_STATUSES = {
 }
 
 
-HTTP_METHODS = frozenset(("GET", "HEAD", "POST", "OPTIONS", "CONNECT",
-    "TRACE", "PUT", "PATCH", "DELETE"))
+SUPPORTED_METHODS = frozenset(("GET", "HEAD", "POST", "OPTIONS",
+    "PUT", "PATCH", "DELETE"))
 
 
 #=============================#

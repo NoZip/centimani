@@ -100,7 +100,7 @@ class Headers(defaultdict):
         else:
             self.__getitem__(name).append(str(value))
 
-    def header_fields(self):
+    def fields(self):
         """Yields (name, value) pairs for each field in the headers.
 
         Usually, only one tuple with the same name should be yielded,
@@ -114,9 +114,3 @@ class Headers(defaultdict):
                     yield (name, value)
             else:
                 yield (name, ", ".join(values))
-
-    def http_encode(self):
-        """Returns all headers as a string containing each header line."""
-        tmp = self.header_fields()
-        lines = ("{0}: {1}\r\n".format(name, value) for name, value in tmp)
-        return "".join(lines)

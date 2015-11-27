@@ -132,6 +132,10 @@ class ChunkedBodyReader(AbstractBodyReader):
         self.body_size = 0
         self.headers = Headers()
 
+    @property
+    def is_complete(self):
+        return self._eof
+
     @coroutine
     def __aiter__(self):
         return self
