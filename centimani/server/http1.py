@@ -18,6 +18,7 @@ from centimani.utils import HTTP_STATUSES, SUPPORTED_METHODS
 if "StopAsyncIteration" not in dir(__builtins__):
     from asyncioplus.utils import StopAsyncIteration
 
+
 _LOGGER = logging.getLogger(__name__)
 
 _SEGMENT = rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@]|%[0-9A-F]{2})+"
@@ -40,6 +41,8 @@ class ConnectionLogger(logging.LoggerAdapter):
 
 
 class Http1Connection(AbstractConnection):
+    """Handles HTTP/1.x connections."""
+
     def __init__(self, manager, reader, writer, peername):
         super().__init__(manager, reader, writer, peername)
         self.logger = ConnectionLogger(_LOGGER, peername)
@@ -47,6 +50,8 @@ class Http1Connection(AbstractConnection):
 
     @coroutine
     def run(self):
+        """Start listening to requests, using a pipelined transport."""
+
         self.logger.info("connection ready")
 
         while self.transport.keep_alive:
@@ -60,6 +65,10 @@ class Http1Connection(AbstractConnection):
 
 
 class Http1Transport(AbstractTransport):
+    """This transport implements functions for receiving HTTp requests
+    and send HTTP responses.
+    """
+
     def __init__(self, connection, timeout=90):
         super().__init__(connection)
         self.timeout = timeout
@@ -67,6 +76,13 @@ class Http1Transport(AbstractTransport):
         self.client_version = "1.0"
 
     def create_body_reader(self):
+        """Create the current request body reader, based on its header
+        fields informations.
+
+        A request with a content-length header field will be given a
+        ``BufferedBodyReader``, and a request with a chunked
+        transfert-encoding will retuns a ``ChunkedBodyReader``.
+        """
         headers = self.request.headers
 
         transfert_encoding = headers.get("transfert-encoding", [])
@@ -92,6 +108,11 @@ class Http1Transport(AbstractTransport):
 
     @coroutine
     def send_response(self, status, headers=None, body=None):
+        """Send an HTTP response.
+
+        This function will add the date, server and connection header
+        fields to the given hedaer fields.
+        """
         assert self.response is None
 
         tmp = ("HTTP/1.1", str(status), HTTP_STATUSES[status])
@@ -138,11 +159,17 @@ class Http1Transport(AbstractTransport):
 
     @coroutine
     def send_error(self, code, headers=None, **kwargs):
+        """Shortcut used to send HTTP errors to the client."""
         assert 400 <= code < 600
         yield from self.send_response(code, headers)
 
     @coroutine
     def run(self):
+        """Receive a request, then send an appropriate response.
+
+        This coroutine will returns when the request processing is
+        over.
+        """
         self.request = None
         self.body_reader = None
         self.handler = None
@@ -175,6 +202,9 @@ class Http1Transport(AbstractTransport):
 
     @coroutine
     def receive_request(self):
+        """Coroutine called by ``run`` in order the receive and parse
+        a new request.
+        """
         tmp = self.reader.read_until(b"\r\n\r\n")
         tmp = asyncio.wait_for(tmp, self.timeout)
 
@@ -299,6 +329,9 @@ class Http1Transport(AbstractTransport):
 
     @coroutine
     def handle_request(self):
+        """This coroutine, called by ``run``, will route the request
+        to the associated  request handler.
+        """
         #-----------------#
         # Request routing #
         #-----------------#
@@ -345,6 +378,10 @@ class Http1Transport(AbstractTransport):
 
     @coroutine
     def cleanup(self):
+        """Cleanup the transport after each exchange.
+
+        Request body not completely read will be read into devnull.
+        """
         if self.body_reader and not self.body_reader.is_complete:
             with open(os.devnull, "wb") as null:
                 yield from self.body_reader.read_into(null)

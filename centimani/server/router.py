@@ -6,6 +6,9 @@ class RoutingError(Exception):
 
 
 class Router:
+    """This function build a routing structure, and find request handlers
+    associated to a specific path.
+    """
     @staticmethod
     def _build_route(route):
         pattern, handler_factory = route
@@ -15,6 +18,9 @@ class Router:
         self._routes = tuple(map(self._build_route, routes))
 
     def find_route(self, path):
+        """Find the route associated to ``path``. Raises a ``RoutingError``
+        if not found.
+        """
         for pattern, handler_factory in self._routes:
             match = pattern.match(path)
             if match:
