@@ -1,13 +1,14 @@
 import asyncio
+import asyncioplus
 import os
 import re
 
 from asyncio import coroutine
-from asyncioplus.iostream import *
 from io import BytesIO
 from socket import socket
 from urllib.parse import *
 
+from centimani import __version__
 from .compression import *
 from .headers import Headers
 from centimani.utils import HTTP_STATUSES, HTTP_METHODS, BufferedBodyReader, ChunkedBodyReader
@@ -21,7 +22,7 @@ if "StopAsyncIteration" not in dir(__builtins__):
 
 class Request:
     def __init__(self, url, method = "GET", headers = None):
-        self.uel = url
+        self.url = url
         self.headers = headers or Headers()
         self.method = method
 
@@ -36,11 +37,13 @@ class Response:
 # Async HTTP client #
 #===================#
 
-_status_line = rb"^HTTP/(\d+\.\d+) (\d{3}) (.+)$"
+DEFAULT_USER_AGENT = "Centimani/{0}".format(__version__)
+
+_STATUS_LINE = rb"^HTTP/(\d+\.\d+) (\d{3}) (.+)$"
 STATUS_LINE_REGEX = re.compile(_status_line)
 
 class ClientConnection:
-    def __init__(self, user_agent = "Centimani/0.1", loop = None):
+    def __init__(self, user_agent=DEFAULT_USER_AGENT, loop=None):
         self._loop = loop or asyncio.get_event_loop()
 
         self.is_closed = True
@@ -54,7 +57,7 @@ class ClientConnection:
             return False
         elif 100 <= status < 200:
             return False
-        elif status in frozenset({204, 304}):
+        elif status in (204, 304):
             return False
         elif method == "CONNECT" and 200 <= status < 300:
             return False
@@ -69,7 +72,9 @@ class ClientConnection:
         self.host = host
         self.port = port
 
-        self.reader, self.writer = yield from open_connection(host, port, loop = self._loop)
+        self.reader, self.writer = yield from asyncioplus.open_connection(
+            host, port, loop=self._loop
+        )
 
         self.is_closed = False
 

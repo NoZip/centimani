@@ -28,9 +28,6 @@ import re
 from asyncio import coroutine
 from datetime import datetime
 
-if "StopAsyncIteration" not in dir(__builtins__):
-    from asyncioplus.utils import StopAsyncIteration
-
 
 # HTTP statuses
 # non-annotted statuses are defined in RFC7231
