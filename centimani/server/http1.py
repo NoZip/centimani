@@ -61,7 +61,8 @@ class Http1Connection(AbstractConnection):
                 break
 
         self.logger.info("connection closing")
-        self.close()
+        if not self.writer.is_closing():
+            self.close()
 
 
 class Http1Transport(AbstractTransport):
@@ -69,7 +70,7 @@ class Http1Transport(AbstractTransport):
     and send HTTP responses.
     """
 
-    def __init__(self, connection, timeout=90):
+    def __init__(self, connection, timeout=30):
         super().__init__(connection)
         self.timeout = timeout
         self.keep_alive = True

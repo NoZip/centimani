@@ -84,7 +84,6 @@ class ConnectionManager:
 
         yield from task
 
-        connection.close()
         del self._connections[peername]
 
     @coroutine
