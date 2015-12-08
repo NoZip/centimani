@@ -149,6 +149,8 @@ class ChunkedBodyReader(AbstractBodyReader):
         chunk_size = int(chunk_header, base=16)
 
         if chunk_size == 0:
+            check_crlf = yield from self._reader.read(2)
+            assert check_crlf == b"\r\n"
             yield from self._parse_trailer_headers()
             self._eof = True
             raise StopAsyncIteration
