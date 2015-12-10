@@ -38,7 +38,7 @@ class Headers(defaultdict):
     def split_field_content(cls, string):
         """Returns the string splitted at the commas."""
         if "," in string and not is_rfc1123_datetime(string):
-            return [v.strip() for v in string.split(",")]
+            return [s.strip() for s in string.split(",")]
         else:
             return string
 
@@ -52,9 +52,11 @@ class Headers(defaultdict):
         if not match:
             raise HeaderParseError(line)
 
-        name, content = (s.decode("ascii") for s in match.groups(b""))
+        name, content = (s.decode("ascii").strip() for s in match.groups(b""))
         name = name.lower()
-        content = cls.split_field_content(content)
+
+        if name != "set-cookie":
+            content = cls.split_field_content(content)
 
         return (name, content)
 
