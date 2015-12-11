@@ -14,12 +14,14 @@ class Request:
             method="GET",
             header_fields=None,
             body=None,
-            body_streaming_callback=None):
+            body_streaming_callback=None,
+            timeout=None):
         self.url = url
         self.method = method
         self.header_fields = header_fields or Headers()
         self.body = body
         self.body_streaming_callback = body_streaming_callback
+        self.timeout = timeout
         self.redirect_count = 0
 
     def __repr__(self):
@@ -85,28 +87,32 @@ class AbstractConnection:
 
     @property
     def protocol(self):
+        """The associated protocol."""
         raise NotImplementedError
 
     @property
     def last_activity(self):
+        """Time of last activity on this connection."""
         return self._last_activity
 
     def is_closing(self):
+        """Returns True if the connection is closing or closed."""
         return self._writer.is_closing()
 
     def touch(self):
+        """Change last activity time to now."""
         self._last_activity = self._loop.time()
 
-    def acquire(self):
-        raise NotImplementedError
-
-    def release(self):
+    def lock(self, semaphore):
+        """Locks this connection."""
         raise NotImplementedError
 
     @coroutine
     def fetch(self, request):
+        """Send a request to the server and returns the response."""
         raise NotImplementedError
 
     def close(self):
+        """Closes this connection."""
         assert not self._writer.is_closing()
         self._writer.close()

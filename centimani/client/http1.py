@@ -7,6 +7,7 @@ from asyncio import coroutine
 if "StopAsyncIteration" not in dir(__builtins__):
     from asyncioplus import StopAsyncIteration
 
+from .errors import ClientConnectionError, ClientTimeoutError
 from .handlers import AbstractConnection, Response
 from centimani.headers import Headers
 from centimani.streamutils import BufferedBodyReader, ChunkedBodyReader
@@ -26,39 +27,90 @@ class ConnectionLogger(logging.LoggerAdapter):
 
 
 class Http1Connection(AbstractConnection):
+    """A Connection that impelment the HTTP/1.1 protocol, as defined in 
+    RFC7230 and RFC7231.
+    """
 
     def __init__(self, manager, reader, writer, peername, queue=None, loop=None):
         super().__init__(manager, reader, writer, peername, loop=loop)
         self._logger = ConnectionLogger(_LOGGER, self._peername)
-        self._is_acquired = False
+        self._semaphore = None
+        self._is_locked = False
 
     @property
     def protocol(self):
         return "http/1.1"
 
     @property
-    def is_acquired(self):
-        return not self._is_acquired
-
-    @property
     def is_available(self):
+        """An HTTP connection is available if it is not closing and
+        not locked.
+        """
         if not self._writer.is_closing():
-            return not self._is_acquired
+            return not self._is_locked
         else:
             return False
     
-    def acquire(self):
-        assert not self._is_acquired
-        self._is_acquired = True
+    def lock(self, semaphore):
+        """Lock this connection and link it to the ressource mananged by
+        the ``semaphore``.
 
-    def release(self):
-        assert self._is_acquired
-        self._is_acquired = False
+        The semaphore will be released when the next call to ``fetch``
+        retruns or raise an exception.
+        """
+        assert not self._is_locked
+        self._semaphore = semaphore
+        self._is_locked = True
 
     @coroutine
     def fetch(self, request):
+        """Send the ``request`` to the server and returns the response.
+
+        When the response is built or an exception is raised, the
+        semaphore passed to ``lock`` will be released and the connection
+        will be unlocked.
+
+        If an exception is raised, the connection will be closed.
+        """
         assert not self._writer.is_closing()
-        assert self._is_acquired
+        assert self._is_locked
+
+        try:
+            if request.timeout is not None:
+                response = yield from asyncio.wait_for(
+                    self._fetch(request),
+                    request.timeout
+                )
+            else:
+                response = yield from self._fetch(request)
+
+        except ConnectionError as error:
+            if not self.is_closing():
+                self.close()
+
+            msg = "connection error during handling of {0}".format(request)
+            raise ClientConnectionError(msg) from error
+
+        except asyncio.TimeoutError as error:
+            if not self.is_closing():
+                self.close()
+
+            msg = "request {0} timeout.".format(request)
+            raise ClientTimeoutError(msg) from error
+
+        finally:
+            if self._semaphore is not None:
+                self._semaphore.release()
+
+            self._is_locked = False
+
+        return response
+
+    @coroutine
+    def _fetch(self, request):
+        """Used by ``fetch`` to actually do the request/response transfert."""
+        assert not self._writer.is_closing()
+        assert self._is_locked
 
         start_time = self._loop.time()
 
@@ -96,6 +148,9 @@ class Http1Connection(AbstractConnection):
         status_line, *header_field_lines = header.split(b"\r\n")
 
         if not status_line:
+            if not self.is_closing():
+                self.close()
+
             raise EOFError
 
         version, status, reason = status_line.split(maxsplit=2)

@@ -6,22 +6,12 @@ import logging
 from asyncio import coroutine
 from collections import defaultdict, namedtuple
 
+from .errors import ClientConnectionError, ClientTimeoutError
 from .handlers import Request
 from .http1 import Http1Connection
 
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class RequestTimeoutError(Exception):
-    def __init__(self, request):
-        self.request = request
-
-    def __str__(self):
-        return repr(self.request)
-
-
-PendingRequest = namedtuple("PendingRequest", ("request", "event", "t0"))
 
 
 class ConnectionManager:
@@ -39,13 +29,13 @@ class ConnectionManager:
     def __init__(
             self,
             *,
-            request_timeout=60,
+            connection_timeout=30,
             keep_alive_timeout=60,
             max_endpoint_connections=None,
             max_connections=None,
             max_redirections=5,
             loop=None):
-        self._request_timeout = request_timeout
+        self._connection_timeout = connection_timeout
         self._keep_alive_timeout = keep_alive_timeout
         self._max_endpoint_connections = max_endpoint_connections
         self._max_connections = max_connections
@@ -62,10 +52,13 @@ class ConnectionManager:
         self._cleanup_task = self._loop.create_task(self._cleanup())
 
     def _default_semaphore(self):
-        return asyncio.BoundedSemaphore(
-            self._max_endpoint_connections,
-            loop=self._loop
-        )
+        if self._max_endpoint_connections is not None:
+            return asyncio.BoundedSemaphore(
+                self._max_endpoint_connections,
+                loop=self._loop
+            )
+        else:
+            return None
 
     @coroutine
     def _cleanup(self):
@@ -138,6 +131,11 @@ class ConnectionManager:
         """Get or create a connection in order to send ``request`` on it."""
         key = (request.scheme, request.authority)
 
+        semaphore = self._semaphores[key]
+
+        if semaphore is not None:
+            yield from semaphore.acquire()
+
         connections = self._connections[key]
         available_connections = [c for c in connections if c.is_available]
 
@@ -145,11 +143,17 @@ class ConnectionManager:
             # connections are available, we choose the less active one.
             available_connections.sort(key=lambda c: c.last_activity)
             connection = available_connections[0]
-            connection.acquire()
+            connection.lock(semaphore)
         else:
             # no available connection, open a new connection.
-            connection = yield from self.open_connection(key)
-            connection.acquire()
+            try:
+                connection = yield from self.open_connection(key)
+            except ConnectionError as error:
+                # connection aborted, release the semaphore
+                semaphore.release()
+                raise                
+
+            connection.lock(semaphore)
             connections.append(connection)
             
         connection.touch()
@@ -201,19 +205,27 @@ class ConnectionManager:
 
         key = (request.scheme, request.authority)
 
-        if self._max_endpoint_connections is not None:
-            # connections limit: use the endpoint semaphore
-            with (yield from self._semaphores[key]):
+        try:
+            if self._connection_timeout:
+                connection = yield from asyncio.wait_for(
+                    self.connect(request),
+                    self._connection_timeout
+                )
+
+            else:
                 connection = yield from self.connect(request)
-                response = yield from connection.fetch(request)
-                connection.touch()
-                connection.release()
-        else:
-            connection = yield from self.connect(request)
-            response = yield from connection.fetch(request)
-            connection.touch()
-            connection.release()
-            
+
+        except asyncio.TimeoutError as error:
+            msg = "Connection to {0} timeout.".format(key)
+            raise ClientTimeoutError(msg) from error
+
+        except ConnectionError as error:
+            msg = "Unable to connect to {0}".format(key)
+            raise ClientConnectionError(msg) from error
+
+        response = yield from connection.fetch(request)
+
+        connection.touch()    
 
         # automatic redirection
         if response.status in {301, 302, 307, 308}:
@@ -233,6 +245,7 @@ class ConnectionManager:
         return response
 
     def close(self):
+        """Closes all connections."""
         self._cleanup_task.cancel()
 
         connections = itertools.chain.from_iterable(self._connections.values())
