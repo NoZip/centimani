@@ -14,22 +14,15 @@ about the encoding or blocking operations.
 import io
 
 from asyncio import coroutine
+
 from centimani.headers import Headers
 
-class AbstractBodyReader:
-    @coroutine
-    def read_into(self, stream):
-        running = True
-        while running:
-            try:
-                data = yield from self.__anext__()
-            except StopAsyncIteration:
-                running = False
-            else:
-                stream.write(data)
+
+class InvalidChunkError(Exception):
+    pass
 
 
-class BufferedBodyReader(AbstractBodyReader):
+class BufferedBodyReader:
     """This class is used to read data from a ``StreamReader`` in blocks,
     in order to avoid event loop blocking.
 
@@ -57,13 +50,11 @@ class BufferedBodyReader(AbstractBodyReader):
         self._body_size = body_size
         self._block_size = block_size
         self._current_block = 0
-        self._eof = False
+        self._is_complete = False
 
         if self._body_size is not None:
             tmp = divmod(self._body_size, self._block_size)
             self._block_count, self._last_block_size = tmp
-
-        self.bytes_read = 0
 
     @property
     def is_complete(self):
@@ -73,15 +64,16 @@ class BufferedBodyReader(AbstractBodyReader):
         * reading is not finished yet.
         * an EOF was received before all data was read.
         """
-        return self.bytes_read == self._body_size
+        return self._is_complete
 
-    @coroutine
-    def __aiter__(self):
+    async def __aiter__(self):
         return self
 
-    @coroutine
-    def __anext__(self):
+    async def __anext__(self):
         """Returns the next read block."""
+        if self._is_complete:
+            raise StopAsyncIteration
+        
         if self._body_size is not None:
             if self._current_block < self._block_count:
                 block_size = self._block_size
@@ -93,22 +85,24 @@ class BufferedBodyReader(AbstractBodyReader):
             block_size = self._block_size
 
         if block_size == 0:
-            self._eof = True
+            self._is_complete = True
             raise StopAsyncIteration
 
-        block = yield from self._reader.read(block_size)
+        block = await self._reader.read(block_size)
 
         if block == b"":
-            self._eof = True
-            raise StopAsyncIteration
+            if self._body_size is None:
+                self._is_complete = True
+                raise StopAsyncIteration
+            else:
+                raise EOFError
 
-        self.bytes_read += len(block)
         self._current_block += 1
 
         return block
 
 
-class ChunkedBodyReader(AbstractBodyReader):
+class ChunkedBodyReader:
     """This class is used to handle the chunked transfert encoding.
     
     Attributes:
@@ -124,53 +118,54 @@ class ChunkedBodyReader(AbstractBodyReader):
         """
         self._reader = reader
         self._current_chunk = 0
-        self._eof = False
+        self._is_complete = False
 
-        self.body_size = 0
-        self.headers = Headers()
+        self._body_size = 0
+        self._headers = Headers()
 
     @property
     def is_complete(self):
-        return self._eof
+        return self._is_complete
 
-    @coroutine
-    def __aiter__(self):
+    @property
+    def body_size(self):
+        return self._body_size
+
+    @property
+    def headers(self):
+        return self._headers
+
+    async def __aiter__(self):
         return self
 
-    @coroutine
-    def __anext__(self):
+    async def __anext__(self):
         """Returns the next chunk of data."""
-        assert not self._eof
+        if self._is_complete:
+            raise StopAsyncIteration
 
-        chunk_header = yield from self._reader.read_until(b"\r\n")
+        chunk_header = await self._reader.read_until(b"\r\n")
         chunk_size = int(chunk_header, base=16)
 
         if chunk_size == 0:
-            check_crlf = yield from self._reader.read(2)
-            assert check_crlf == b"\r\n"
-            yield from self._parse_trailer_headers()
-            self._eof = True
+            await self._parse_trailer_headers()
+            self._is_complete = True
             raise StopAsyncIteration
 
-        chunk = yield from self._reader.read(chunk_size)
-        check_crlf = yield from self._reader.read(2)
+        chunk = await self._reader.read_until(b"\r\n")
 
         if len(chunk) != chunk_size:
-            raise Exception("chunk has a wrong size")
+            raise InvalidChunkError("chunk has a wrong size")
 
-        if check_crlf != b"\r\n":
-            raise Exception("chunk not followed by CRLF")
-
-        self.body_size += len(chunk)
+        self._body_size += len(chunk)
         self._current_chunk += 1
 
         return chunk
 
-    @coroutine
-    def _parse_trailer_headers(self):
+    async def _parse_trailer_headers(self):
         """When the last chunk of data is received, this method parse
         the trailing headers, if present.
-
-        TODO: implements this.
         """
-        pass
+        trailer_field = await self._reader.read_until(b"\r\n")
+        while trailer_field:
+            name, content = self._headers.parse_line(trailer_field)
+            self._headers.add(name, content)

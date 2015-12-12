@@ -374,12 +374,12 @@ class Http1Transport(AbstractTransport):
         tmp = method_handler(*args, **kwargs)
         yield from self.loop.create_task(tmp)
 
-    @coroutine
-    def cleanup(self):
+    async def cleanup(self):
         """Cleanup the transport after each exchange.
 
         Request body not completely read will be read into devnull.
         """
         if self.body_reader and not self.body_reader.is_complete:
             with open(os.devnull, "wb") as null:
-                yield from self.body_reader.read_into(null)
+                async for data in self.body_reader:
+                    null.write(data)

@@ -55,7 +55,7 @@ class Headers(defaultdict):
         name, content = (s.decode("ascii").strip() for s in match.groups(b""))
         name = name.lower()
 
-        if name != "set-cookie":
+        if name != "set-cookie" or is_rfc1123_datetime(content):
             content = cls.split_field_content(content)
 
         return (name, content)
