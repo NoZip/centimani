@@ -4,9 +4,6 @@ import time
 
 from asyncio import coroutine
 
-if "StopAsyncIteration" not in dir(__builtins__):
-    from asyncioplus import StopAsyncIteration
-
 from .errors import ClientConnectionError, ClientTimeoutError
 from .handlers import AbstractConnection, Response
 from centimani.headers import Headers

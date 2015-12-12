@@ -16,9 +16,6 @@ import io
 from asyncio import coroutine
 from centimani.headers import Headers
 
-if "StopAsyncIteration" not in dir(__builtins__):
-    from asyncioplus import StopAsyncIteration
-
 class AbstractBodyReader:
     @coroutine
     def read_into(self, stream):

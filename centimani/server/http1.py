@@ -15,9 +15,6 @@ from centimani.server.handlers import AbstractConnection, AbstractTransport
 from centimani.streamutils import BufferedBodyReader, ChunkedBodyReader
 from centimani.utils import HTTP_STATUSES, SUPPORTED_METHODS
 
-if "StopAsyncIteration" not in dir(__builtins__):
-    from asyncioplus import StopAsyncIteration
-
 
 _LOGGER = logging.getLogger(__name__)
 

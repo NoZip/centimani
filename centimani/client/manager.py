@@ -1,11 +1,11 @@
 import asyncio
-import asyncioplus
 import itertools
 import logging
 
 from asyncio import coroutine
 from collections import defaultdict, namedtuple
 
+from centimani.stream import open_connection
 from .errors import ClientConnectionError, ClientTimeoutError
 from .handlers import Request
 from .http1 import Http1Connection
@@ -181,7 +181,7 @@ class ConnectionManager:
             host = authority
             port = self.default_port(scheme)
 
-        reader, writer = yield from asyncioplus.open_connection(
+        reader, writer = yield from open_connection(
             host, port, ssl=ssl
         )
 

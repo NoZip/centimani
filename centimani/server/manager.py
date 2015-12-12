@@ -1,9 +1,9 @@
 import asyncio
 import logging
-import asyncioplus
 
 from asyncio import coroutine
 from centimani import __version__
+from centimani.stream import start_server
 from .handlers import RequestHandler
 from .http1 import Http1Connection
 from .router import Router
@@ -95,7 +95,7 @@ class ConnectionManager:
         # ssl_context = SSLContext(PROTOCOL_SSLv23)
         # ssl_context.set_alpn_protocols(self.supported_protocols)
 
-        server = yield from asyncioplus.start_server(
+        server = yield from start_server(
             self.create_connection,
             host = host,
             port = port,
