@@ -1,7 +1,12 @@
+"""
+This module defines the ``Server`` class that manages clients connections
+and dispatch them to the corresponding ``Connection`` instances.
+"""
+
 import asyncio
 import logging
+import ssl
 
-from asyncio import coroutine
 from centimani import __version__
 from centimani.stream import start_server
 from .handlers import RequestHandler
@@ -11,6 +16,8 @@ from .router import Router
 
 _LOGGER = logging.getLogger(__name__)
 
+DEFAULT_ALPN_PROTOCOLS = ("http/1.1",)
+
 DEFAULT_PROTOCOL_MAP = {
     "http/1.1" : Http1Connection,
 }
@@ -18,7 +25,7 @@ DEFAULT_PROTOCOL_MAP = {
 DEFAULT_SERVER_AGENT = "Centimani/{0}".format(__version__)
 
 
-class ConnectionManager:
+class Server:
     """This class listen to client connections and send them to
     connections instances.
 
@@ -26,42 +33,60 @@ class ConnectionManager:
     :loop: The manager event loop.
     :router: The ``Router`` instance used to associate request handlers
         to requests.
-    :protocol_map: A mapping that associate the ALPN name for a protocol
-        to its connection class.
-    :server_agent: The name of this server, as sent in the server header
-        field.
+    :server_agent: The name of this server as sended by the "server"
+        header field. Defaults to "Centimani/<version>"
     """
 
     def __init__(
             self,
             routes,
-            protocol_map = DEFAULT_PROTOCOL_MAP,
-            server_agent = DEFAULT_SERVER_AGENT,
-            loop = None):
+            *,
+            ssl=None,
+            ssl_parameters=None,
+            alpn_protocols=DEFAULT_ALPN_PROTOCOLS,
+            protocol_map=DEFAULT_PROTOCOL_MAP,
+            server_agent=DEFAULT_SERVER_AGENT,
+            loop=None):
         """Initializes the manager.
         
         Arguments:
         :routes: A sequence of (pattern, handler_factory) that would
             be parsed by the ``Router`` class.
-        :protocol_map: The manager protocol_map.
+        :alpn_protocols: The protocols supported over TLS by this server,
+            ordered by preference.
+        :protocol_map: A mapping linking ALPN protocol names to a
+            corresponding ``AbstractConnection`` subclass.
         :server_agent: The manager server_agent.
-        :loop: The manager event loop.
+        :loop: The server event loop.
         """
-        self.loop = loop or asyncio.get_event_loop()
-        self.router = Router(routes)
-        self.protocol_map = protocol_map
-        self.server_agent = server_agent
+        self._loop = loop or asyncio.get_event_loop()
+        self._router = Router(routes)
+        self._protocol_map = protocol_map
+        self._server_agent = server_agent
         self._connections = {}
+        self._server = None
+
+        if ssl:
+            self._ssl = ssl
+            # self._ssl.set_alpn_protocols(alpn_protocols)
+        else:
+            self._ssl = None
 
         _LOGGER.debug(self.router._routes)
 
     @property
-    def supported_protocols(self):
-        """Returns a tuple of all supported ALPN protocols."""
-        return tuple(self.protocols_map.keys())
+    def loop(self):
+        return self._loop
+    
+    @property
+    def router(self):
+        return self._router
 
-    @coroutine
-    def create_connection(self, reader, writer):
+    @property
+    def server_agent(self):
+        return self._server_agent
+
+    async def create_connection(self, reader, writer):
         """Create a connection instance and run it.
 
         This coroutine is called each time a new client connects to this
@@ -76,33 +101,34 @@ class ConnectionManager:
         else:
             protocol = "http/1.1"
 
-        connection_factory = self.protocol_map[protocol]
+        connection_factory = self._protocol_map[protocol]
         connection = connection_factory(self, reader, writer, peername)
-        task = self.loop.create_task(connection.run())
+        task = self.loop.create_task(connection.listen())
+
+        print(task)
 
         self._connections[peername] = (connection, task)
 
-        yield from task
+        await task
 
         del self._connections[peername]
 
-    @coroutine
-    def listen(self, host="localhost", port=8080):
+    async def listen(self, host="localhost", port=8080):
         """Start the dispatcher from listening on given port,
         binded to given host.
         """
-
-        # ssl_context = SSLContext(PROTOCOL_SSLv23)
-        # ssl_context.set_alpn_protocols(self.supported_protocols)
-
-        server = yield from start_server(
+        self._server = await start_server(
             self.create_connection,
             host = host,
             port = port,
-            # ssl = ssl_context,
+            ssl = self._ssl,
             loop = self.loop
         )
 
         _LOGGER.info("server listening on %s:%d", host, port)
 
-        return server
+    def close(self):
+        self._server.close()
+
+    async def wait_closed(self):
+        await self._server.wait_closed()

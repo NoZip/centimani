@@ -237,10 +237,6 @@ class StreamWriter:
         assert not self.is_closing()
         self._transport.write_eof()
 
-    def close(self):
-        assert not self.is_closing()
-        self._transport.close()
-
     async def drain(self):
         """Waits until all data is sended to remote peer.
 
@@ -267,6 +263,10 @@ class StreamWriter:
             await event
         finally:
             self._pending = None
+
+    def close(self):
+        assert not self.is_closing()
+        self._transport.close()
 
 
 class StreamingProtocol(asyncio.Protocol):

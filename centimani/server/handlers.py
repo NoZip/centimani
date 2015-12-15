@@ -1,10 +1,19 @@
 import asyncio
-
-from asyncio import coroutine
+import logging
 
 from centimani.headers import Headers
-from centimani.utils import SUPPORTED_METHODS
 
+
+_LOGGER = logging.getLogger(__name__)
+
+REQUEST_METHODS = frozenset(
+    {"GET", "HEAD", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"}
+)
+
+
+#======================================#
+# HTTP Response and Request Structures #
+#======================================#
 
 class Request:
     """Structure used to store server requests."""
@@ -43,34 +52,67 @@ class Response:
         return "".join(("Response(", ", ".join(fields), ")"))
 
 
-class AbstractConnection:
-    """Interface for connections initiated in ``ConnectionManager``.
+#======================================#
+# Connection and Protocol base classes #
+#======================================#
+
+class ConnectionLogger(logging.LoggerAdapter):
+    """A logging adapter used to log message associated with connection
+    peername.
+    """
+    def __init__(self, logger, peername):
+        super().__init__(logger, {"peername": peername})
+
+    def process(self, msg, kwargs):
+        tmp = "@{0[0]}:{0[1]}\n{1}".format(self.extra["peername"], msg)
+        return tmp, kwargs
+
+
+class Connection:
+    """Interface for connections initiated in ``Server``.
 
     Attributes:
-    :manager: The connection manager that have created this connection.
+    :server: The server that have created this connection.
     :reader: The sream for reading data from the remote client.
-    :writer: The stream dor sending data to the remote client.
+    :writer: The stream for sending data to the remote client.
     :peername: A (host, port) tuple associated to the client, as returned
         by ``Socket.getpeername``.
     """
 
-    def __init__(self, manager, reader, writer, peername):
+    def __init__(self, server, reader, writer, peername, logger=_LOGGER):
         """Initialize the connection."""
-        self.manager = manager
-        self.reader = reader
-        self.writer = writer
-        self.peername = peername
+        self._server = server
+        self._reader = reader
+        self._writer = writer
+        self._peername = peername
+        self._logger = ConnectionLogger(logger, self.peername)
 
     @property
-    def loop(self):
-        return self.manager.loop
+    def server(self):
+        return self._server
 
     @property
-    def router(self):
-        return self.manager.router
+    def reader(self):
+        return self._reader
 
-    @coroutine
-    def run(self):
+    @property
+    def writer(self):
+        return self._writer
+
+    @property
+    def peername(self):
+        return self._peername
+
+    @property
+    def logger(self):
+        return self._logger
+
+    @property
+    def _loop(self):
+        """Shortcut property that returns server's loop."""
+        return self._server._loop
+
+    async def listen(self):
         """ This method is executed when the client connects to the
         server and returns when the connection should be closed.
         """
@@ -78,14 +120,15 @@ class AbstractConnection:
 
     def close(self):
         """Close the connection."""
-        self.writer.close()
+        if not self.writer.is_closing():
+            self.writer.close()
 
 
-class AbstractTransport:
-    """This class defines the layer between the ``RequestHandler``,
-    that will handle the reception of the request, the delegation
-    to a request handler, receiving the payload of the request and
-    sending the response.
+class ProtocolHandler:
+    """This class defines the layer between ``RequestHandler`` and
+    ``Connection``. It will handle the reception of the request, the
+    delegation to a request handler, receiving the payload of the
+    request and sending the response.
 
     Attributes:
     :connection: The connection that created this transport.
@@ -93,81 +136,90 @@ class AbstractTransport:
     :body_reader: The current body reader, used to read the request
         payload.
     :handler: The current handler, chosen from the current request.
-    :response: The response sent, may be sent by the handler, or an error
-        sent by the transport.
+    :response: The response sent, may be sent by the handler, or an
+        error sent by the transport.
     :error: The current HTTP error, is None if there is no error.
     """
 
     def __init__(self, connection):
         """Initialize the transport."""
-        self.connection = connection
-        
-        self.request = None
-        self.body_reader = None
-        self.handler = None
-        self.response = None
-        self.error = None
+        self._connection = connection
+
+        self._request = None
+        self._body_reader = None
+        self._handler = None
+        self._response = None
+        self._error = None
 
     @property
-    def loop(self):
-        return self.connection.loop
+    def request(self):
+        return self._request
 
     @property
-    def logger(self):
-        return self.connection.logger
+    def body_reader(self):
+        return self._body_reader
 
     @property
-    def reader(self):
-        return self.connection.reader
-    
-    @property
-    def writer(self):
-        return self.connection.writer
+    def handler(self):
+        return self._handler
 
     @property
-    def router(self):
-        return self.connection.router
-    
-    def rethrow(self):
-        """Raises the current error."""
-        if self.error is not None:
-            raise self.error
+    def response(self):
+        return self._response
 
-    @coroutine
-    def send_response(self, status, headers=None, body=None):
+    @property
+    def error(self):
+        return self._error
+
+    #------------------------------------#
+    # Shortcuts to connection attributes #
+    #------------------------------------#
+
+    @property
+    def _loop(self):
+        return self._connection._loop
+
+    @property
+    def _server(self):
+        return self._connection._server
+
+    @property
+    def _logger(self):
+        return self._connection._logger
+
+    @property
+    def _reader(self):
+        return self._connection._reader
+
+    @property
+    def _writer(self):
+        return self._connection._writer
+
+    @property
+    def _peername(self):
+        return self._connection._peername
+
+    #------------------#
+    # Abstract methods #
+    #------------------#
+
+    async def send_response(self, status, headers=None, body=None):
         """Send an HTTP response to the remote client.
 
         Arguments:
         :status: The HTTP status of the response.
         :headers: A collection of header fields sent in the response.
-        :body: the response payload body. 
+        :body: the response payload body.
         """
         raise NotImplementedError
 
-    @coroutine
-    def send_error(self, status, headers=None, **kwargs):
-        raise NotImplementedError
+    async def send_error(self, code, headers=None, **kwargs):
+        """Shortcut used to send HTTP errors to the client."""
+        assert 400 <= code < 600
+        await self.send_response(code, headers)
 
-    @coroutine
-    def run(self):
+    async def process_request(self):
         """Process a single request, then returns."""
-        raise NotImplementedError
-
-    @coroutine
-    def receive_request(self):
-        """Read data from the client to parse its request. Returns that
-        request.
-        """
-        raise NotImplementedError
-
-    @coroutine
-    def handle_request(self):
-        """Call the adequate ``RequestHandler`` that will send a response."""
-        raise NotImplementedError
-
-    @coroutine
-    def cleanup(self):
-        """Executed after the request handling."""
         raise NotImplementedError
 
 
@@ -185,7 +237,7 @@ class MetaRequestHandler(type):
     def __init__(cls, name, bases, namespace):
         methods = set()
 
-        for method in SUPPORTED_METHODS:
+        for method in REQUEST_METHODS:
             method_handler = getattr(cls, method.lower(), None)
             if method_handler and asyncio.iscoroutinefunction(method_handler):
                 methods.add(method.lower())
@@ -193,41 +245,47 @@ class MetaRequestHandler(type):
         cls.methods = frozenset(methods)
 
 
-class RequestHandler(metaclass=MetaRequestHandler):
+class RequestHandler:
     """Base class for all user defined request handlers.
 
     Each method defined in a sublass of this class that have the same
     name as an HTTP method will be called to handle this HTTP method.
     """
 
-    def __init__(self, transport):
-        self.transport = transport
-        self.request = transport.request
-        self.body_reader = transport.body_reader
+    @classmethod
+    def allowed_methods(cls):
+        return frozenset(
+            method for method in REQUEST_METHODS
+            if hasattr(cls, method.lower())
+        )
+
+    def __init__(self, protocol):
+        self._protocol = protocol
+        self.request = protocol.request
+        self.body_reader = protocol.body_reader
 
     def send_response(self, status, headers=None, body=None):
-        """A shortcut to the transport ``send_response`` method."""
-        assert self.request is self.transport.request
+        """A shortcut to the protocol ``send_response`` method."""
+        assert self.request is self._protocol.request
 
         if isinstance(body, str):
             body = body.encode("utf-8")
 
-        return self.transport.send_response(status, headers, body)
+        return self._protocol.send_response(status, headers, body)
 
     def send_error(self, status, headers=None, **kwargs):
-        """A shortcut to the transport ``send_response`` method."""
-        assert self.request is self.transport.request
-        return self.transport.send_error(status, headers, **kwargs)
+        """A shortcut to the protocol ``send_response`` method."""
+        assert self.request is self._protocol.request
+        return self._protocol.send_error(status, headers, **kwargs)
 
-    @coroutine
-    def can_continue(self):
+    async def can_continue(self):
         """Checks if the validity of the request may be asserted before
         reading the payload body.
 
         This function should retuns True if the request is fine or if
         this handler requires the payload body.
-        When this function returns True, it should have send an error
-        prior to returning, or the default error 417 wiil be sent to the
+        When this function returns False, it should have send an error
+        prior to returning, or the default error 417 will be sent to the
         client.
         """
         return True

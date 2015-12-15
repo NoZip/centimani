@@ -3,17 +3,16 @@ import logging
 import os
 import re
 
-from asyncio import coroutine
 from datetime import datetime
 from urllib.parse import unquote_plus, parse_qs
 
 from centimani.errors import HttpError
 from centimani.headers import Headers, HeaderParseError
-from centimani.server.router import RoutingError
-from centimani.server.handlers import Request, Response
-from centimani.server.handlers import AbstractConnection, AbstractTransport
 from centimani.streamutils import BufferedBodyReader, ChunkedBodyReader
 from centimani.utils import HTTP_STATUSES, SUPPORTED_METHODS
+from .router import RoutingError
+from .handlers import Request, Response
+from .handlers import Connection, ProtocolHandler
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,58 +21,58 @@ _SEGMENT = rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@]|%[0-9A-F]{2})+"
 _PATH = rb"/(?:" + _SEGMENT + rb"(?:/" + _SEGMENT + rb")*/?)?"
 _QUERY = rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@/?]|%[0-9A-F]{2})*"
 
-
 _REQUEST_LINE = rb"^([A-Z]+)[ \t]+(\*|" + _PATH + rb")"
 _REQUEST_LINE += rb"(?:\?(" + _QUERY + rb"))?[ \t]+HTTP/(\d+\.\d+)$"
 REQUEST_LINE_REGEX = re.compile(_REQUEST_LINE)
 
 
-class ConnectionLogger(logging.LoggerAdapter):
-    def __init__(self, logger, peername):
-        super().__init__(logger, {"peername": peername})
-
-    def process(self, msg, kwargs):
-        tmp = "@{0[0]}:{0[1]}\n{1}".format(self.extra["peername"], msg)
-        return tmp, kwargs
-
-
-class Http1Connection(AbstractConnection):
+class Http1Connection(Connection):
     """Handles HTTP/1.x connections."""
 
-    def __init__(self, manager, reader, writer, peername):
-        super().__init__(manager, reader, writer, peername)
-        self.logger = ConnectionLogger(_LOGGER, peername)
-        self.transport = Http1Transport(self)
+    def __init__(self, server, reader, writer, peername):
+        super().__init__(server, reader, writer, peername, _LOGGER)
+        self._pipeline = Http1Pipeline(self)
 
-    @coroutine
-    def run(self):
-        """Start listening to requests, using a pipelined transport."""
+    async def listen(self):
+        """Start listening to requests, using a pipeline."""
 
-        self.logger.info("connection ready")
+        self._logger.info("connection ready")
 
-        while self.transport.keep_alive:
+        while self._pipeline.keep_alive:
             try:
-                yield from self.transport.run()
+                await self._pipeline.process_request()
             except ConnectionError:
                 break
 
-        self.logger.info("connection closing")
-        if not self.writer.is_closing():
+        self._logger.info("connection closing")
+        if not self._writer.is_closing():
             self.close()
 
 
-class Http1Transport(AbstractTransport):
-    """This transport implements functions for receiving HTTp requests
+class Http1Pipeline(ProtocolHandler):
+    """This transport implements functions for receiving HTTP requests
     and send HTTP responses.
     """
 
-    def __init__(self, connection, timeout=30):
+    def __init__(self, connection, timeout=60):
         super().__init__(connection)
-        self.timeout = timeout
-        self.keep_alive = True
-        self.client_version = "1.0"
+        self._timeout = timeout
+        self._keep_alive = True
+        self._client_version = "1.0"
 
-    def create_body_reader(self):
+    @property
+    def timeout(self):
+        return self._timeout
+
+    @property
+    def keep_alive(self):
+        return self._keep_alive
+
+    @property
+    def client_version(self):
+        return self._client_version
+
+    def _create_body_reader(self):
         """Create the current request body reader, based on its header
         fields informations.
 
@@ -81,7 +80,7 @@ class Http1Transport(AbstractTransport):
         ``BufferedBodyReader``, and a request with a chunked
         transfert-encoding will retuns a ``ChunkedBodyReader``.
         """
-        headers = self.request.headers
+        headers = self._request.headers
 
         transfert_encoding = headers.get("transfert-encoding", [])
         content_length = headers.get("content-length", [])
@@ -92,35 +91,39 @@ class Http1Transport(AbstractTransport):
             assert len(content_length) == 1
 
             body_size = int(content_length[0])
-            body_reader = BufferedBodyReader(self.reader, body_size)
+            body_reader = BufferedBodyReader(self._reader, body_size)
 
         elif "chunked" in transfert_encoding:
             assert transfert_encoding[-1] == "chunked"
 
             if transfert_encoding[:-1]:
                 raise NotImplementedError
-            
+
             body_reader = ChunkedBodyReader(self.reader)
 
         return body_reader
 
-    @coroutine
-    def send_response(self, status, headers=None, body=None):
+    async def send_response(self, status, headers=None, body=None):
         """Send an HTTP response.
 
         This function will add the date, server and connection header
         fields to the given hedaer fields.
         """
-        assert self.response is None
+        assert self._response is None
 
-        tmp = ("HTTP/1.1", str(status), HTTP_STATUSES[status])
-        tmp = (s.encode("ascii") for s in tmp)
-        status_line = b" ".join(tmp) + b"\r\n"
+        reason = HTTP_STATUSES[status]
+        status_line = "HTTP/1.1 {0} {1}\r\n".format(status, reason)
+
+        # User defined "connection" header for closing connection
+        # after response.
+        if headers:
+            if self._keep_alive and "close" in headers.pop("connection", []):
+                self._keep_alive = False
 
         response_headers = Headers(
             date=datetime.utcnow(),
-            server=self.connection.manager.server_agent,
-            connection="keep-alive" if self.keep_alive else "close"
+            server=self._server.server_agent,
+            connection="keep-alive" if self._keep_alive else "close"
         )
 
         if headers is not None:
@@ -133,93 +136,84 @@ class Http1Transport(AbstractTransport):
         else:
             raise Exception("body must be bytes or None")
 
-        response_header = bytearray(status_line)
+        response_header = bytearray(status_line.encode("ascii"))
 
-        for field in response_headers.fields():
-            tmp = (s.encode("ascii") for s in field)
-            tmp = b": ".join(tmp)
-            response_header.extend(tmp)
-            response_header.extend(b"\r\n")
+        for name, content in response_headers.fields():
+            field_line = "{0}: {1}\r\n".format(name.title(), content)
+            response_header.extend(field_line.encode("ascii"))
 
+        # HTTP header trailing blank line
         response_header.extend(b"\r\n")
 
-        self.logger.debug(response_header.decode("ascii"))
+        self._logger.debug(response_header.decode("ascii"))
 
-        self.writer.write(response_header)
+        self._writer.write(response_header)
 
         if body is not None:
-            self.writer.write(body)
+            self._writer.write(body)
 
-        yield from self.writer.drain()
+        await self._writer.drain()
 
         if status >= 200:
-            self.response = Response(status, response_headers)
+            self._response = Response(status, response_headers)
 
-    @coroutine
-    def send_error(self, code, headers=None, **kwargs):
-        """Shortcut used to send HTTP errors to the client."""
-        assert 400 <= code < 600
-        yield from self.send_response(code, headers)
-
-    @coroutine
-    def run(self):
+    async def process_request(self):
         """Receive a request, then send an appropriate response.
 
         This coroutine will returns when the request processing is
         over.
         """
-        self.request = None
-        self.body_reader = None
-        self.handler = None
-        self.response = None
-        self.error = None
+        self._request = None
+        self._body_reader = None
+        self._handler = None
+        self._response = None
+        self._error = None
 
         try:
-            self.request = yield from self.receive_request()
-            self.body_reader = self.create_body_reader()
-            yield from self.handle_request()
+            self._request = await self._receive_request()
+            self._body_reader = self._create_body_reader()
+            await self._handle_request()
 
         except EOFError:
-            self.keep_alive = False
+            self._keep_alive = False
 
         except HttpError as error:
-            self.error = error
-            yield from self.send_response(error.code, error.headers)
+            self._error = error
+            await self.send_response(error.code, error.headers)
 
         except ConnectionError:
-            self.logger.exception("connection error occurred")
+            self._logger.exception("connection error occurred")
             raise
 
         except Exception:
-            self.logger.exception("unexpected error occurred")
-            self.error = HttpError(500)
-            yield from self.send_error(500)
+            self._logger.exception("unexpected error occurred")
+            self._error = HttpError(500)
+            await self.send_error(500)
 
         finally:
-            yield from self.cleanup()
+            if self._keep_alive:
+                await self.cleanup()
 
-    @coroutine
-    def receive_request(self):
+    async def _receive_request(self):
         """Coroutine called by ``run`` in order the receive and parse
         a new request.
         """
-        tmp = self.reader.read_until(b"\r\n\r\n")
-        tmp = asyncio.wait_for(tmp, self.timeout)
+        tmp = self._reader.read_until(b"\r\n\r\n")
 
         try:
-            header = yield from tmp
-        except asyncio.TimeoutError:
-            self.keep_alive = False
-            raise HttpError(408)
+            header = await asyncio.wait_for(tmp, self._timeout)
+        except asyncio.TimeoutError as error:
+            self._keep_alive = False
+            raise HttpError(408) from error
 
         request_line, *headers_lines = header.split(b"\r\n")
 
         if not request_line:
             # No request line = EOF, so we close the connection
-            self.logger.info("no request line, at EOF")
+            self._logger.info("no request line, at EOF")
             raise EOFError
 
-        self.logger.debug(request_line)
+        self._logger.debug(request_line)
 
         #----------------------#
         # Request line parsing #
@@ -239,10 +233,10 @@ class Http1Transport(AbstractTransport):
 
         if is_malformed:
             # Bad request
-            self.logger.info("request line malformed")
+            self._logger.info("request line malformed")
             raise HttpError(400)
 
-        self.logger.debug(match.groups(b""))
+        self._logger.debug(match.groups(b""))
 
         tmp = (s.decode("ascii") for s in match.groups(b""))
         method, path, query, version = tmp
@@ -260,9 +254,9 @@ class Http1Transport(AbstractTransport):
             query = {}
 
         # upgrade client_version if needed
-        if self.client_version < version:
-            self.client_version = version
-            self.logger.info("client version set to %s", version)
+        if self._client_version < version:
+            self._client_version = version
+            self._logger.info("client version set to %s", version)
 
         request = Request(method, path, query)
 
@@ -274,10 +268,10 @@ class Http1Transport(AbstractTransport):
             request.headers.parse_lines(headers_lines)
         except HeaderParseError as error:
             # Bad request
-            self.logger.info("malformed header field")
+            self._logger.info("malformed header field")
             raise HttpError(400)
 
-        self.logger.debug(request.headers)
+        self._logger.debug(request.headers)
 
         #-------------------------------------#
         # Body length and encoding validation #
@@ -289,24 +283,24 @@ class Http1Transport(AbstractTransport):
         if transfert_encoding:
             if content_length:
                 msg = "transfert-encoding and content-length headers present"
-                self.logger.info(msg)
+                self._logger.info(msg)
                 del request.headers["content-length"]
-            
+
             if transfert_encoding[-1] != "chunked":
-                self.logger.info("chunked is not the final encoding")
-                self.keep_alive = False
+                self._logger.info("chunked is not the final encoding")
+                self._keep_alive = False
                 raise HttpError(400)
-            
-        
+
+
         elif content_length:
             if len(content_length) > 1:
-                self.logger.info("multiple content-length headers")
-                self.keep_alive = False
+                self._logger.info("multiple content-length headers")
+                self._keep_alive = False
                 raise HttpError(400)
 
             if not re.match(r"^[1-9][0-9]*$", content_length[0]):
-                self.logger.info("malformed content-length value")
-                self.keep_alive = False
+                self._logger.info("malformed content-length value")
+                self._keep_alive = False
                 raise HttpError(400)
 
         else:
@@ -318,15 +312,14 @@ class Http1Transport(AbstractTransport):
 
         connection = request.headers.get("connection", [])
 
-        self.keep_alive = (
+        self._keep_alive = (
             version == "1.1" and "close" not in connection
             or version == "1.0" and "keep_alive" in connection
         )
 
         return request
 
-    @coroutine
-    def handle_request(self):
+    async def _handle_request(self):
         """This coroutine, called by ``run``, will route the request
         to the associated  request handler.
         """
@@ -334,52 +327,52 @@ class Http1Transport(AbstractTransport):
         # Request routing #
         #-----------------#
 
-        method = self.request.method
+        method = self._request.method
 
         try:
-            tmp = self.router.find_route(self.request.path)
+            tmp = self._server.router.find_route(self._request.path)
             request_handler_factory, args, kwargs = tmp
         except RoutingError as error:
             # No route finded, send 404 not find error
-            self.logger.info("route not find")
-            raise HttpError(404)
+            self._logger.info("route not find")
+            raise HttpError(404) from error
 
-        if method.lower() not in request_handler_factory.methods:
+        allowed_methods = request_handler_factory.allowed_methods()
+        if method not in allowed_methods:
             # Method not implemented, send error 405 not implemented
-            self.logger.info("method not implemented")
-            error_headers = Headers(allowed=request_handler_factory.methods)
+            self._logger.info("method not implemented")
+            error_headers = Headers(allowed=allowed_methods)
             raise HttpError(405, error_headers)
 
         #-------------------------#
         # Request handler calling #
         #-------------------------#
 
-        self.handler = request_handler_factory(self)
-        method_handler = getattr(self.handler, method.lower())
+        self._handler = request_handler_factory(self)
+        method_handler = getattr(self._handler, method.lower())
 
-        can_continue = yield from self.handler.can_continue()
+        can_continue = await self.handler.can_continue()
 
         if not can_continue:
-            if "100-continue" in self.request.headers.get("except", []):
-                if not self.response:
+            if "100-continue" in self._request.headers.get("except", []):
+                if not self._response:
                     # if the can_continue method does not send an error,
                     # send a 417 error.
-                    self.logger.info("expectation failed")
+                    self._logger.info("expectation failed")
                     raise HttpError(417)
 
-        if "100-continue" in self.request.headers.get("except", []):
-            yield from self.handler.send_response(100)
-
+        if "100-continue" in self._request.headers.get("except", []):
+            await self._handler.send_response(100)
 
         tmp = method_handler(*args, **kwargs)
-        yield from self.loop.create_task(tmp)
+        await self._loop.create_task(tmp)
 
     async def cleanup(self):
         """Cleanup the transport after each exchange.
 
         Request body not completely read will be read into devnull.
         """
-        if self.body_reader and not self.body_reader.is_complete:
+        if self._body_reader and not self._body_reader.is_complete:
             with open(os.devnull, "wb") as null:
-                async for data in self.body_reader:
+                async for data in self._body_reader:
                     null.write(data)
