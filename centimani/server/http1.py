@@ -17,13 +17,20 @@ from .handlers import Connection, ProtocolHandler
 
 _LOGGER = logging.getLogger(__name__)
 
-_SEGMENT = rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@]|%[0-9A-F]{2})+"
-_PATH = rb"/(?:" + _SEGMENT + rb"(?:/" + _SEGMENT + rb")*/?)?"
-_QUERY = rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@/?]|%[0-9A-F]{2})*"
+_REQUEST_LINE = rb"""
+^
+([A-Z]+)
+[ \t]+
+(\*|/(?:%(segment)b(?:/%(segment)b)*/?)?)(?:\?(%(query)b))?
+[ \t]+
+HTTP/(\d+\.\d+)
+$
+""" % {
+    b"segment": rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@]|%[0-9A-F]{2})+",
+    b"query": rb"(?:[-._~A-Za-z0-9!$&'()*+,;=:@/?]|%[0-9A-F]{2})*"
+}
 
-_REQUEST_LINE = rb"^([A-Z]+)[ \t]+(\*|" + _PATH + rb")"
-_REQUEST_LINE += rb"(?:\?(" + _QUERY + rb"))?[ \t]+HTTP/(\d+\.\d+)$"
-REQUEST_LINE_REGEX = re.compile(_REQUEST_LINE)
+REQUEST_LINE_REGEX = re.compile(_REQUEST_LINE, re.VERBOSE)
 
 
 class Http1Connection(Connection):
