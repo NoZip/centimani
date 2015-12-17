@@ -13,16 +13,19 @@ from .http1 import Http1Connection
 
 _LOGGER = logging.getLogger(__name__)
 
+DEFAULT_PORT = {
+    "http": 80,
+    "https": 443,
+}
 
-class ConnectionManager:
+
+class Client:
 
     @staticmethod
     def default_port(scheme):
         """Helper that return the default port linked to a scheme."""
-        if scheme == "http":
-            return 80
-        elif scheme == "https":
-            return 443
+        if scheme in DEFAULT_PORT:
+            return DEFAULT_PORT[scheme]
         else:
             ValueError("{!r} is not a valid scheme.".format(scheme))
 
@@ -32,19 +35,17 @@ class ConnectionManager:
             connection_timeout=30,
             keep_alive_timeout=60,
             max_endpoint_connections=None,
-            max_connections=None,
             max_redirections=5,
             loop=None):
         self._connection_timeout = connection_timeout
         self._keep_alive_timeout = keep_alive_timeout
         self._max_endpoint_connections = max_endpoint_connections
-        self._max_connections = max_connections
         self._max_redirections = max_redirections
 
         self._loop = loop or asyncio.get_event_loop()
-        
-        self._connections = defaultdict(list)
-        self._semaphores = defaultdict(self._default_semaphore)
+
+        self._endpoint_connections = defaultdict(list)
+        self._endpoint_semaphores = defaultdict(self._default_semaphore)
 
         self._permanent_redirects = {}
 
@@ -52,16 +53,14 @@ class ConnectionManager:
         self._cleanup_task = self._loop.create_task(self._cleanup())
 
     def _default_semaphore(self):
-        if self._max_endpoint_connections is not None:
-            return asyncio.BoundedSemaphore(
-                self._max_endpoint_connections,
-                loop=self._loop
-            )
-        else:
-            return None
+        assert self.max_endpoint_connections
 
-    @coroutine
-    def _cleanup(self):
+        return asyncio.BoundedSemaphore(
+            self._max_endpoint_connections,
+            loop=self._loop
+        )
+
+    async def _cleanup(self):
         """Runs the cleanup task.
 
         Runs ``_cleanup_endpoint`` for each endpoint and remove endpoints
@@ -71,28 +70,28 @@ class ConnectionManager:
         while self._cleanup_running:
             _LOGGER.debug("cleanup waked up.")
 
-            for key in self._connections:
-                yield from self._cleanup_endpoint(key)
+            for key in self._endpoint_connections:
+                self._cleanup_endpoint(key)
 
             no_connection_endpoint = [
-                key for key, endpoint_connections in self._connections.items()
+                key for key, endpoint_connections in self._endpoint_connections.items()
                 if not endpoint_connections
             ]
 
             for key in no_connection_endpoint:
                 _LOGGER.debug("remove endpoint %s", key)
-                del self._connections[key]
+                del self._endpoint_connections[key]
+                del self._endpoint_semaphores[key]
 
-            yield from asyncio.sleep(10)
+            await asyncio.sleep(10)
 
-    @coroutine
     def _cleanup_endpoint(self, key):
         """Cleanup connections for the endpoint designed by ``key``.
 
         - Closes timed out connections.
         - Removes closing connections.
         """
-        endpoint_connections = self._connections[key]
+        endpoint_connections = self._endpoint_connections[key]
         now = self._loop.time()
 
         _LOGGER.debug("connections to %s:\n%s", key, endpoint_connections)
@@ -126,17 +125,17 @@ class ConnectionManager:
         for connection in closing_connections:
             endpoint_connections.remove(connection)
 
-    @coroutine
-    def connect(self, request):
+    async def connect(self, request):
         """Get or create a connection in order to send ``request`` on it."""
         key = (request.scheme, request.authority)
 
-        semaphore = self._semaphores[key]
+        if self._max_endpoint_connections is not None:
+            semaphore = self._endpoint_semaphores[key]
+            await semaphore.acquire()
+        else:
+            semaphore = None
 
-        if semaphore is not None:
-            yield from semaphore.acquire()
-
-        connections = self._connections[key]
+        connections = self._endpoint_connections[key]
         available_connections = [c for c in connections if c.is_available]
 
         if available_connections:
@@ -147,21 +146,20 @@ class ConnectionManager:
         else:
             # no available connection, open a new connection.
             try:
-                connection = yield from self.open_connection(key)
+                connection = await self.open_connection(key)
             except ConnectionError as error:
                 # connection aborted, release the semaphore
                 semaphore.release()
-                raise                
+                raise
 
             connection.lock(semaphore)
             connections.append(connection)
-            
+
         connection.touch()
 
         return connection
 
-    @coroutine
-    def open_connection(self, key):
+    async def open_connection(self, key):
         """Open a new connection to endpoint defined by ``scheme``
         and ``authority``.
         """
@@ -181,17 +179,16 @@ class ConnectionManager:
             host = authority
             port = self.default_port(scheme)
 
-        reader, writer = yield from open_connection(
+        reader, writer = await open_connection(
             host, port, ssl=ssl
         )
 
         peername = writer.get_extra_info("peername")
 
-        Connection = Http1Connection
-        return Connection(self, reader, writer, peername)
+        connection_factory = Http1Connection
+        return connection_factory(self, reader, writer, peername)
 
-    @coroutine
-    def fetch(self, url_or_request, **kwargs):
+    async def fetch(self, url_or_request, **kwargs):
         """Send an HTTP request and returns the server response.
 
         ``url_or_request`` may be a ``Request`` instance or a URL string.
@@ -207,13 +204,13 @@ class ConnectionManager:
 
         try:
             if self._connection_timeout:
-                connection = yield from asyncio.wait_for(
+                connection = await asyncio.wait_for(
                     self.connect(request),
                     self._connection_timeout
                 )
 
             else:
-                connection = yield from self.connect(request)
+                connection = await self.connect(request)
 
         except asyncio.TimeoutError as error:
             msg = "Connection to {0} timeout.".format(key)
@@ -223,9 +220,9 @@ class ConnectionManager:
             msg = "Unable to connect to {0}".format(key)
             raise ClientConnectionError(msg) from error
 
-        response = yield from connection.fetch(request)
+        response = await connection.fetch(request)
 
-        connection.touch()    
+        connection.touch()
 
         # automatic redirection
         if response.status in {301, 302, 307, 308}:
@@ -240,7 +237,7 @@ class ConnectionManager:
 
                     request.url = location
                     request.redirect_count += 1
-                    response = yield from self.fetch(request)
+                    response = await self.fetch(request)
 
         return response
 
@@ -248,7 +245,7 @@ class ConnectionManager:
         """Closes all connections."""
         self._cleanup_task.cancel()
 
-        connections = itertools.chain.from_iterable(self._connections.values())
+        connections = itertools.chain.from_iterable(self._endpoint_connections.values())
 
         connections_to_close = (
             connection for connection in connections

@@ -5,7 +5,7 @@ import time
 from asyncio import coroutine
 
 from .errors import ClientConnectionError, ClientTimeoutError
-from .handlers import AbstractConnection, Response
+from .handlers import Connection, Response
 from centimani.headers import Headers
 from centimani.streamutils import BufferedBodyReader, ChunkedBodyReader
 from centimani.errors import HttpError
@@ -14,23 +14,17 @@ from centimani.errors import HttpError
 _LOGGER = logging.getLogger(__name__)
 
 
-class ConnectionLogger(logging.LoggerAdapter):
-    def __init__(self, logger, peername):
-        super().__init__(logger, {"peername": peername})
-
-    def process(self, msg, kwargs):
-        tmp = "@{0[0]}:{0[1]}\n{1}".format(self.extra["peername"], msg)
-        return tmp, kwargs
-
-
-class Http1Connection(AbstractConnection):
-    """A Connection that impelment the HTTP/1.1 protocol, as defined in 
+class Http1Connection(Connection):
+    """A Connection that impelment the HTTP/1.1 protocol, as defined in
     RFC7230 and RFC7231.
     """
 
-    def __init__(self, manager, reader, writer, peername, queue=None, loop=None):
-        super().__init__(manager, reader, writer, peername, loop=loop)
-        self._logger = ConnectionLogger(_LOGGER, self._peername)
+    def __init__(
+            self,
+            manager,
+            reader, writer, peername,
+            loop=None):
+        super().__init__(manager, reader, writer, peername, logger=_LOGGER)
         self._semaphore = None
         self._is_locked = False
 
@@ -47,7 +41,7 @@ class Http1Connection(AbstractConnection):
             return not self._is_locked
         else:
             return False
-    
+
     def lock(self, semaphore):
         """Lock this connection and link it to the ressource mananged by
         the ``semaphore``.
@@ -59,8 +53,7 @@ class Http1Connection(AbstractConnection):
         self._semaphore = semaphore
         self._is_locked = True
 
-    @coroutine
-    def fetch(self, request):
+    async def fetch(self, request):
         """Send the ``request`` to the server and returns the response.
 
         When the response is built or an exception is raised, the
@@ -74,12 +67,12 @@ class Http1Connection(AbstractConnection):
 
         try:
             if request.timeout is not None:
-                response = yield from asyncio.wait_for(
+                response = await asyncio.wait_for(
                     self._fetch(request),
                     request.timeout
                 )
             else:
-                response = yield from self._fetch(request)
+                response = await self._fetch(request)
 
         except ConnectionError as error:
             if not self.is_closing():
@@ -103,8 +96,7 @@ class Http1Connection(AbstractConnection):
 
         return response
 
-    @coroutine
-    def _fetch(self, request):
+    async def _fetch(self, request):
         """Used by ``fetch`` to actually do the request/response transfert."""
         assert not self._writer.is_closing()
         assert self._is_locked
@@ -135,13 +127,13 @@ class Http1Connection(AbstractConnection):
         if request.body:
             self._writer.write(request.body)
 
-        yield from self._writer.drain()
+        await self._writer.drain()
 
         #------------------#
         # Receive response #
         #------------------#
 
-        header = yield from self._reader.read_until(b"\r\n\r\n")
+        header = await self._reader.read_until(b"\r\n\r\n")
         status_line, *header_field_lines = header.split(b"\r\n")
 
         if not status_line:
@@ -169,44 +161,38 @@ class Http1Connection(AbstractConnection):
 
             body_reader = ChunkedBodyReader(self._reader)
 
-            it = yield from body_reader.__aiter__()
-            running = True
-            while running:
-                try:
-                    block = yield from it.__anext__()
-                except StopAsyncIteration:
-                    running = False
+            async for block in body_reader:
+                if request.body_streaming_callback is None:
+                    body.extend(block)
                 else:
-                    if request.body_streaming_callback is None:
-                        body.extend(block)
-                    else:
-                        request.body_streaming_callback(block)
+                    request.body_streaming_callback(block)
 
         elif content_length:
             body_length = int(content_length[0])
             body_reader = BufferedBodyReader(self._reader, body_length)
 
-            it = yield from body_reader.__aiter__()
-            running = True
-            while running:
-                try:
-                    chunk = yield from it.__anext__()
-                except StopAsyncIteration:
-                    running = False
+            async for chunk in body_reader:
+                if request.body_streaming_callback is None:
+                    body.extend(chunk)
                 else:
-                    if request.body_streaming_callback is None:
-                        body.extend(chunk)
-                    else:
-                        request.body_streaming_callback(chunk)
+                    request.body_streaming_callback(chunk)
 
         response.body = bytes(body)
 
-        if "close" in response.header_fields.get("connection", []):
+        connection = response.header_fields.get("connection", [])
+        keep_alive = (
+            version == "1.1" and "close" not in connection
+            or version == "1.0" and "keep_alive" in connection
+        )
+
+        if not keep_alive:
             self._writer.close()
 
         end_time = self._loop.time()
         delta_time = end_time - start_time
-        self._logger.debug("response built in %fs:\n%s\n%s",
-            delta_time, request, response)
+        self._logger.debug(
+            "response built in %fs:\n%s\n%s",
+            delta_time, request, response
+        )
 
         return response

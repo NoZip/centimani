@@ -1,9 +1,13 @@
 import asyncio
+import logging
 import urllib.parse as urlparse
 
 from asyncio import coroutine
 
 from centimani.headers import Headers
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class Request:
@@ -68,14 +72,24 @@ class Response:
         return "<Response {0}>".format(self.status)
 
 
-class AbstractConnection:
+class ConnectionLogger(logging.LoggerAdapter):
+    def __init__(self, logger, peername):
+        super().__init__(logger, {"peername": peername})
 
-    def __init__(self, manager, reader, writer, peername, loop=None):
-        self._manager = manager
+    def process(self, msg, kwargs):
+        tmp = "@{0[0]}:{0[1]}\n{1}".format(self.extra["peername"], msg)
+        return tmp, kwargs
+
+
+class Connection:
+
+    def __init__(self, client, reader, writer, peername, logger=_LOGGER):
+        self._client = client
         self._reader = reader
         self._writer = writer
         self._peername = peername
-        self._loop = loop or asyncio.get_event_loop()
+        self._logger = ConnectionLogger(logger, self._peername)
+
         self._last_activity = self._loop.time()
 
     def __repr__(self):
@@ -86,9 +100,8 @@ class AbstractConnection:
         )
 
     @property
-    def protocol(self):
-        """The associated protocol."""
-        raise NotImplementedError
+    def _loop(self):
+        return self._client._loop
 
     @property
     def last_activity(self):
@@ -107,8 +120,7 @@ class AbstractConnection:
         """Locks this connection."""
         raise NotImplementedError
 
-    @coroutine
-    def fetch(self, request):
+    async def fetch(self, request):
         """Send a request to the server and returns the response."""
         raise NotImplementedError
 

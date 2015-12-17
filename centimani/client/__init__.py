@@ -1,1 +1,1 @@
-from .manager import ConnectionManager
+from .manager import Client
