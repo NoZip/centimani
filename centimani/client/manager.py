@@ -1,6 +1,7 @@
 import asyncio
 import itertools
 import logging
+import ssl
 
 from asyncio import coroutine
 from collections import defaultdict, namedtuple
@@ -18,6 +19,11 @@ DEFAULT_PORT = {
     "https": 443,
 }
 
+DEFAULT_ALPN_PROTOCOLS = ("http/1.1",)
+
+DEFAULT_PROTOCOL_MAP = {
+    "http/1.1" : Http1Connection,
+}
 
 class Client:
 
@@ -36,11 +42,21 @@ class Client:
             keep_alive_timeout=60,
             max_endpoint_connections=None,
             max_redirections=5,
+            alpn_protocols=DEFAULT_ALPN_PROTOCOLS,
+            protocol_map=DEFAULT_PROTOCOL_MAP,
             loop=None):
         self._connection_timeout = connection_timeout
         self._keep_alive_timeout = keep_alive_timeout
         self._max_endpoint_connections = max_endpoint_connections
         self._max_redirections = max_redirections
+
+        self._ssl_context = ssl.create_default_context()
+        self._ssl_context.check_hostname = False
+        self._ssl_context.verify_mode = ssl.CERT_NONE
+        if ssl.HAS_ALPN:
+            self._ssl_context.set_alpn_protocols(alpn_protocols)
+
+        self._protocol_map = protocol_map
 
         self._loop = loop or asyncio.get_event_loop()
 
@@ -166,9 +182,9 @@ class Client:
         scheme, authority = key
 
         if scheme == "http":
-            ssl = None
+            ssl_context = None
         elif scheme == "https":
-            ssl = True
+            ssl_context = self._ssl_context
         else:
             ValueError("{!r} is not a valid scheme.".format(scheme))
 
@@ -180,12 +196,19 @@ class Client:
             port = self.default_port(scheme)
 
         reader, writer = await open_connection(
-            host, port, ssl=ssl
+            host, port, ssl=ssl_context
         )
 
         peername = writer.get_extra_info("peername")
+        ssl_object = writer.get_extra_info("ssl_object")
 
-        connection_factory = Http1Connection
+        if scheme == "https" and ssl.HAS_ALPN:
+            protocol = ssl_object.selected_alpn_protocol()
+            _LOGGER.debug("selected ALPN protocol '%s'", protocol)
+        else:
+            protocol = "http/1.1"
+
+        connection_factory = self._protocol_map[protocol]
         return connection_factory(self, reader, writer, peername)
 
     async def fetch(self, url_or_request, **kwargs):

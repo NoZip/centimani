@@ -41,17 +41,17 @@ class Server:
             self,
             routes,
             *,
-            ssl=None,
-            ssl_parameters=None,
+            ssl_context=None,
             alpn_protocols=DEFAULT_ALPN_PROTOCOLS,
             protocol_map=DEFAULT_PROTOCOL_MAP,
             server_agent=DEFAULT_SERVER_AGENT,
             loop=None):
         """Initializes the manager.
-        
+
         Arguments:
         :routes: A sequence of (pattern, handler_factory) that would
             be parsed by the ``Router`` class.
+        :ssl_context: A SSL context that will be used on the listening socket.
         :alpn_protocols: The protocols supported over TLS by this server,
             ordered by preference.
         :protocol_map: A mapping linking ALPN protocol names to a
@@ -66,18 +66,20 @@ class Server:
         self._connections = {}
         self._server = None
 
-        if ssl:
-            self._ssl = ssl
-            # self._ssl.set_alpn_protocols(alpn_protocols)
+        if ssl_context:
+            self._ssl_context = ssl_context
+
+            if ssl.HAS_ALPN:
+                self._ssl_context.set_alpn_protocols(alpn_protocols)
         else:
-            self._ssl = None
+            self._ssl_context = None
 
         _LOGGER.debug(self.router._routes)
 
     @property
     def loop(self):
         return self._loop
-    
+
     @property
     def router(self):
         return self._router
@@ -95,9 +97,9 @@ class Server:
         peername = writer.get_extra_info("peername")
         ssl_object = writer.get_extra_info("ssl_object")
 
-        if ssl_object:
-            protocol = "http/1.1"
-            # protocol = ssl_object.selected_alpn_protocol()
+        if ssl_object and ssl.HAS_ALPN:
+            protocol = ssl_object.selected_alpn_protocol()
+            _LOGGER.debug("%s protocol chosen with ALPN.", protocol)
         else:
             protocol = "http/1.1"
 
@@ -121,7 +123,7 @@ class Server:
             self.create_connection,
             host = host,
             port = port,
-            ssl = self._ssl,
+            ssl = self._ssl_context,
             loop = self.loop
         )
 
